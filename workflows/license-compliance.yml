@@ -11,49 +11,39 @@ name: License Compliance (Reusable)
 # ── Why this matters ──────────────────────────────────────────────────────────
 # As a consulting firm delivering software to enterprise clients, GPL/AGPL
 # licenses in transitive dependencies can create contractual and IP obligations.
-# This workflow surfaces those risks before they reach production.
 #
-# ── Results ───────────────────────────────────────────────────────────────────
-# • SARIF report uploaded to the GitHub Security tab (visible under Code Scanning).
-# • Summary table printed in the job log for quick review.
-# • Workflow fails if any dependency carries a forbidden license.
+# ── Artifacts ────────────────────────────────────────────────────────────────
+# Uploads `license-report` artifact (JSON) for the CI orchestrator report job.
+# Also uploads SARIF to the GitHub Security tab (Code Scanning).
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
   workflow_call:
     inputs:
-      # Comma-separated SPDX license IDs that must never appear in dependencies.
-      # Copyleft licenses are forbidden by default — adjust per project if needed.
       forbidden-licenses:
         description: "Comma-separated SPDX license IDs to treat as violations"
         required: false
         type: string
         default: "GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0,LGPL-2.0,LGPL-2.1,LGPL-3.0,EUPL-1.1,EUPL-1.2,CCDL-1.0,OSL-3.0"
 
-      # Licenses that are always acceptable — skip flagging these even if Trivy
-      # would normally include them in unknown/restricted output.
       allowed-licenses:
         description: "Comma-separated SPDX license IDs that are explicitly permitted"
         required: false
         type: string
         default: "MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0,CC0-1.0,Unlicense,Python-2.0,PSF-2.0"
 
-      # Directory to scan. Defaults to repo root.
       scan-path:
         description: "Directory to scan for dependency manifests"
         required: false
         type: string
         default: "."
 
-      # Trivy severity filter — licenses classified at or above this level will
-      # be reported. UNKNOWN surfaces unlicensed or unrecognised packages.
       severity:
         description: "Minimum severity to report: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
         required: false
         type: string
         default: "HIGH,CRITICAL"
 
-      # Upload results to GitHub Security tab as a Code Scanning alert.
       upload-sarif:
         description: "Upload SARIF results to GitHub Security tab"
         required: false
@@ -68,7 +58,7 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # upload SARIF to GitHub Code Scanning
+  security-events: write
 
 jobs:
   license-check:
@@ -79,7 +69,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ── Build forbidden/allowed lists for Trivy ──────────────────────────
+      # ── Build Trivy config from inputs ───────────────────────────────────
       - name: Prepare Trivy license config
         id: license-config
         shell: bash
@@ -87,8 +77,6 @@ jobs:
           FORBIDDEN: ${{ inputs.forbidden-licenses }}
           ALLOWED:   ${{ inputs.allowed-licenses }}
         run: |
-          # Write a Trivy config file so lists don't have to be passed as
-          # potentially long CLI args (also avoids injection via inputs).
           cat > trivy-license.yaml << EOF
           license:
             forbidden:
@@ -96,11 +84,12 @@ jobs:
             ignored:
           $(echo "${ALLOWED}"   | tr ',' '\n' | sed 's/^/    - /')
           EOF
-
           echo "config_path=trivy-license.yaml" >> "$GITHUB_OUTPUT"
 
-      # ── Scan — table output (job log summary) ────────────────────────────
-      - name: Trivy license scan — summary
+      # ── Scan 1: Table (job log summary) — fails on violations ────────────
+      - name: Trivy license scan — table (fail on violations)
+        id: trivy-table
+        continue-on-error: true
         uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type:    fs
@@ -109,10 +98,65 @@ jobs:
           severity:     ${{ inputs.severity }}
           trivy-config: ${{ steps.license-config.outputs.config_path }}
           format:       table
-          exit-code:    "1"   # fail if forbidden licenses are found
+          exit-code:    "1"
 
-      # ── Scan — SARIF output (GitHub Security tab) ────────────────────────
-      - name: Trivy license scan — SARIF
+      # ── Scan 2: JSON (artifact for report) ───────────────────────────────
+      - name: Trivy license scan — JSON (report artifact)
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type:    fs
+          scan-ref:     ${{ inputs.scan-path }}
+          scanners:     license
+          severity:     ${{ inputs.severity }}
+          trivy-config: ${{ steps.license-config.outputs.config_path }}
+          format:       json
+          output:       trivy-license-raw.json
+          exit-code:    "0"
+
+      # ── Enrich JSON with metadata ─────────────────────────────────────────
+      - name: Enrich license report with metadata
+        if: always()
+        shell: bash
+        env:
+          FORBIDDEN: ${{ inputs.forbidden-licenses }}
+          SEVERITY:  ${{ inputs.severity }}
+        run: |
+          RAW_FILE="trivy-license-raw.json"
+          [ -f "$RAW_FILE" ] || echo '{"Results":[]}' > "$RAW_FILE"
+
+          # Count total packages and violations
+          TOTAL_PKGS=$(jq '[.Results[].Licenses // [] | length] | add // 0' "$RAW_FILE" 2>/dev/null || echo "0")
+          VIOLATIONS=$(jq '[.Results[].Licenses // [] | .[] | select(.Category == "forbidden")] | length' "$RAW_FILE" 2>/dev/null || echo "0")
+
+          jq -n \
+            --argjson raw "$(cat "$RAW_FILE")" \
+            --arg forbidden "$FORBIDDEN" \
+            --arg severity "$SEVERITY" \
+            --argjson total_packages "$TOTAL_PKGS" \
+            --argjson violation_count "$VIOLATIONS" \
+            '{
+              meta: {
+                forbidden_licenses: ($forbidden | split(",")),
+                severity_filter: $severity,
+                total_packages: $total_packages,
+                violation_count: $violation_count
+              },
+              results: $raw.Results
+            }' > license-report.json
+
+      # ── Upload JSON report artifact ───────────────────────────────────────
+      - name: Upload license report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-report
+          path: license-report.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ── Scan 3: SARIF (GitHub Security tab) ──────────────────────────────
+      - name: Trivy license scan — SARIF (Security tab)
         if: inputs.upload-sarif && !cancelled()
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -123,7 +167,7 @@ jobs:
           trivy-config: ${{ steps.license-config.outputs.config_path }}
           format:       sarif
           output:       trivy-license.sarif
-          exit-code:    "0"   # don't fail here — already failed above if needed
+          exit-code:    "0"
 
       - name: Upload SARIF to GitHub Security tab
         if: inputs.upload-sarif && !cancelled()
@@ -131,3 +175,12 @@ jobs:
         with:
           sarif_file: trivy-license.sarif
           category:   license-compliance
+
+      # ── Fail the job if violations were found ────────────────────────────
+      - name: Fail if license violations detected
+        if: steps.trivy-table.outcome == 'failure'
+        shell: bash
+        run: |
+          COUNT=$(jq '.meta.violation_count' license-report.json 2>/dev/null || echo "unknown")
+          echo "::error::${COUNT} license violation(s) detected. Review the 'license-report' artifact for details."
+          exit 1

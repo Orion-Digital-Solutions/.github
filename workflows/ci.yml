@@ -13,51 +13,47 @@ name: Orion CI Orchestrator (Reusable)
 #
 # ── Execution model ───────────────────────────────────────────────────────────
 #
-#   Phase 1 — parallel scans (always run, fast feedback):
+#   Phase 1 — parallel scans (fast feedback, run on every event):
 #     secret-scan  ──┐
 #     sonarcloud   ──┼──► all must pass
 #     license      ──┘
 #
-#   Phase 2 — gated on Phase 1 (push to main/default branch only):
+#   Phase 2 — gated on Phase 1 (push to main branch only):
 #     release-please  (opens/merges release PR)
 #     sbom            (generates SBOM artifacts — independent of release-please)
 #
-#   Final — always runs regardless of outcome:
-#     report          (consolidated markdown summary of all job results)
+#   Final — always runs:
+#     report  (detailed consolidated markdown summary — queries SonarCloud API,
+#              parses Gitleaks JSON and license JSON artifacts)
 #
 # ── What runs and when ────────────────────────────────────────────────────────
-#   pull_request     →  Phase 1 only  (fast feedback on changed code)
+#   pull_request     →  Phase 1 only
 #   push (main)      →  Phase 1 + Phase 2
-#   release created  →  SBOM only     (attach to release assets)
-#   schedule         →  Phase 1 only  (weekly full-history scans)
+#   release created  →  SBOM only
+#   schedule         →  Phase 1 only (full-history secret + license scans)
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
   workflow_call:
     inputs:
-
-      # ── SonarCloud ──────────────────────────────────────────────────────────
       sonar-project-key:
-        description: >
-          SonarCloud project key (e.g. orion-digital-solutions_repo-name).
-          Leave blank to skip the SonarCloud scan.
+        description: "SonarCloud project key (orion-digital-solutions_<repo>). Leave blank to skip."
         required: false
         type: string
         default: ""
 
       sonar-python-coverage-report:
-        description: "Path to Python XML coverage report for SonarCloud (e.g. coverage.xml)"
+        description: "Path to Python XML coverage report (e.g. coverage.xml)"
         required: false
         type: string
         default: ""
 
       sonar-js-coverage-report:
-        description: "Path to JS/TS LCOV coverage report for SonarCloud (e.g. coverage/lcov.info)"
+        description: "Path to JS/TS LCOV coverage report (e.g. coverage/lcov.info)"
         required: false
         type: string
         default: ""
 
-      # ── Language / Runtime Setup ─────────────────────────────────────────────
       python-version:
         description: "Python version to set up (e.g. '3.11'). Leave blank to skip."
         required: false
@@ -76,34 +72,26 @@ on:
         type: string
         default: ""
 
-      # ── Release ──────────────────────────────────────────────────────────────
       release-type:
-        description: >
-          Release Please release type (python, node, java, dotnet, go, simple …).
-          Leave blank to skip automated releases.
+        description: "Release Please release type (python, node, java, dotnet, go, simple). Leave blank to skip."
         required: false
         type: string
         default: ""
 
-      # ── Branch configuration ─────────────────────────────────────────────────
       main-branch:
-        description: "Name of the default/main branch (Phase 2 only runs on this branch)"
+        description: "Name of the default/main branch"
         required: false
         type: string
         default: "main"
 
-      # ── License compliance ───────────────────────────────────────────────────
       forbidden-licenses:
         description: "Comma-separated SPDX license IDs to treat as violations (overrides org default)"
         required: false
         type: string
         default: ""
 
-      # ── Secret scanning ──────────────────────────────────────────────────────
-      # Full history scan is forced on schedule events automatically.
-      # Set true here to force it on any trigger (e.g. first-time onboarding).
       secret-scan-full-history:
-        description: "Force a full git history secret scan regardless of event type"
+        description: "Force a full git history secret scan"
         required: false
         type: boolean
         default: false
@@ -119,10 +107,10 @@ on:
         description: "true if a new GitHub Release was created"
         value: ${{ jobs.release-please.outputs.release-created }}
       release-tag:
-        description: "Git tag of the new release (e.g. v1.4.0), empty if none"
+        description: "Git tag of the new release (e.g. v1.4.0)"
         value: ${{ jobs.release-please.outputs.tag-name }}
       release-version:
-        description: "Version string of the new release (e.g. 1.4.0), empty if none"
+        description: "Version string of the new release (e.g. 1.4.0)"
         value: ${{ jobs.release-please.outputs.version }}
 
     secrets:
@@ -139,37 +127,32 @@ on:
 
 jobs:
 
-  # ── 1a. Secret Scanning ────────────────────────────────────────────────────
   secret-scan:
     name: Secret Scanning
     uses: orion-digital-solutions/.github/workflows/secret-scanning.yml@main
     with:
-      full-scan: >-
-        ${{ inputs.secret-scan-full-history || github.event_name == 'schedule' }}
-      runner: ${{ inputs.runner }}
+      full-scan: ${{ inputs.secret-scan-full-history || github.event_name == 'schedule' }}
+      runner:    ${{ inputs.runner }}
     secrets:
       GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
-  # ── 1b. SonarCloud ────────────────────────────────────────────────────────
   sonarcloud:
     name: SonarCloud
     if: inputs.sonar-project-key != ''
     uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
     with:
-      project-key:             ${{ inputs.sonar-project-key }}
-      python-version:          ${{ inputs.python-version }}
-      node-version:            ${{ inputs.node-version }}
-      java-version:            ${{ inputs.java-version }}
-      python-coverage-report:  ${{ inputs.sonar-python-coverage-report }}
-      js-coverage-report:      ${{ inputs.sonar-js-coverage-report }}
-      runner:                  ${{ inputs.runner }}
+      project-key:            ${{ inputs.sonar-project-key }}
+      python-version:         ${{ inputs.python-version }}
+      node-version:           ${{ inputs.node-version }}
+      java-version:           ${{ inputs.java-version }}
+      python-coverage-report: ${{ inputs.sonar-python-coverage-report }}
+      js-coverage-report:     ${{ inputs.sonar-js-coverage-report }}
+      runner:                 ${{ inputs.runner }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-  # ── 1c. License Compliance ────────────────────────────────────────────────
   license-check:
     name: License Compliance
-    # Skip on release events — no new dependencies were introduced
     if: github.event_name != 'release'
     uses: orion-digital-solutions/.github/workflows/license-compliance.yml@main
     with:
@@ -181,13 +164,9 @@ jobs:
 # PHASE 2 — Gated on Phase 1, push to main branch only
 # ─────────────────────────────────────────────────────────────────────────────
 
-  # ── 2a. Release Please ────────────────────────────────────────────────────
   release-please:
     name: Release Please
     needs: [secret-scan, sonarcloud, license-check]
-    # Run only on push to the main branch when a release type is configured.
-    # Skipped jobs in `needs` are treated as success — so if sonarcloud was
-    # skipped (no project key) this job still runs.
     if: >-
       always() &&
       inputs.release-type != '' &&
@@ -197,22 +176,15 @@ jobs:
       !contains(needs.*.result, 'cancelled')
     uses: orion-digital-solutions/.github/workflows/release-please.yml@main
     with:
-      release-type:              ${{ inputs.release-type }}
-      target-branch:             ${{ inputs.main-branch }}
-      generate-sbom-on-release:  true
-      runner:                    ${{ inputs.runner }}
+      release-type:             ${{ inputs.release-type }}
+      target-branch:            ${{ inputs.main-branch }}
+      generate-sbom-on-release: true
+      runner:                   ${{ inputs.runner }}
     secrets: inherit
-    outputs:
-      release-created: ${{ jobs.release-please.outputs.release-created }}
-      tag-name:        ${{ jobs.release-please.outputs.tag-name }}
-      version:         ${{ jobs.release-please.outputs.version }}
 
-  # ── 2b. SBOM ─────────────────────────────────────────────────────────────
   sbom:
     name: SBOM Generation
     needs: [secret-scan, license-check]
-    # Run on push to main (standalone artifact) or on a release event
-    # (attach to release assets). Independent of release-please.
     if: >-
       always() &&
       (
@@ -228,7 +200,7 @@ jobs:
     secrets: inherit
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FINAL — Consolidated report (always runs, even on failure)
+# FINAL — Detailed consolidated report (always runs)
 # ─────────────────────────────────────────────────────────────────────────────
 
   report:
@@ -238,91 +210,409 @@ jobs:
     runs-on: ${{ inputs.runner }}
 
     steps:
-      - name: Generate consolidated CI report
+      # ── Download artifacts from Phase 1 jobs ────────────────────────────
+      - name: Download Gitleaks report
+        uses: actions/download-artifact@v4
+        with:
+          name: gitleaks-report
+          path: ./reports/gitleaks
+        continue-on-error: true   # artifact may not exist if job was skipped
+
+      - name: Download license report
+        uses: actions/download-artifact@v4
+        with:
+          name: license-report
+          path: ./reports/license
+        continue-on-error: true
+
+      # ── Build detailed report ────────────────────────────────────────────
+      - name: Generate detailed CI report
         shell: bash
         env:
-          # Job results passed through env to avoid expression injection
-          RESULT_SECRET:   ${{ needs.secret-scan.outputs && needs.secret-scan.result || needs.secret-scan.result }}
-          RESULT_SONAR:    ${{ needs.sonarcloud.result }}
-          RESULT_LICENSE:  ${{ needs.license-check.result }}
-          RESULT_RELEASE:  ${{ needs.release-please.result }}
-          RESULT_SBOM:     ${{ needs.sbom.result }}
-          RELEASE_CREATED: ${{ needs.release-please.outputs.release-created }}
-          RELEASE_TAG:     ${{ needs.release-please.outputs.tag-name }}
-          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
-          EVENT:           ${{ github.event_name }}
-          REF:             ${{ github.ref_name }}
-          SHA:             ${{ github.sha }}
-          RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # ── Job results ──────────────────────────────────────────────────
+          RESULT_SECRET:    ${{ needs.secret-scan.result }}
+          RESULT_SONAR:     ${{ needs.sonarcloud.result }}
+          RESULT_LICENSE:   ${{ needs.license-check.result }}
+          RESULT_RELEASE:   ${{ needs.release-please.result }}
+          RESULT_SBOM:      ${{ needs.sbom.result }}
+          RELEASE_CREATED:  ${{ needs.release-please.outputs.release-created }}
+          RELEASE_TAG:      ${{ needs.release-please.outputs.tag-name }}
+          RELEASE_VERSION:  ${{ needs.release-please.outputs.version }}
+          # ── SonarCloud API ───────────────────────────────────────────────
+          SONAR_TOKEN:      ${{ secrets.SONAR_TOKEN }}
+          PROJECT_KEY:      ${{ inputs.sonar-project-key }}
+          # ── Run context ──────────────────────────────────────────────────
+          EVENT:            ${{ github.event_name }}
+          REF:              ${{ github.ref_name }}
+          SHA:              ${{ github.sha }}
+          REPO:             ${{ github.repository }}
+          RUN_ID:           ${{ github.run_id }}
+          SERVER_URL:       ${{ github.server_url }}
         run: |
-          # ── Helper: result → icon ──────────────────────────────────────
+          set -euo pipefail
+          RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
+          SHA_SHORT="${SHA:0:7}"
+
+          # ────────────────────────────────────────────────────────────────
+          # Helper functions
+          # ────────────────────────────────────────────────────────────────
           status_icon() {
             case "$1" in
-              success)   echo "✅ Pass"    ;;
-              failure)   echo "❌ Fail"    ;;
+              success)   echo "✅ Passed"    ;;
+              failure)   echo "❌ Failed"    ;;
               cancelled) echo "🚫 Cancelled" ;;
-              skipped)   echo "⏭️ Skipped" ;;
-              *)         echo "⬜ Unknown"  ;;
+              skipped)   echo "⏭️ Skipped"  ;;
+              *)         echo "⬜ Unknown"   ;;
             esac
           }
 
-          # ── Determine overall result ───────────────────────────────────
-          OVERALL="✅ All checks passed"
-          for result in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
-            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
-              OVERALL="❌ One or more checks failed"
-              break
-            fi
+          rating_badge() {
+            # Converts SonarCloud numeric rating (1-5) to letter badge
+            case "${1%.*}" in
+              1) echo "🟢 A" ;; 2) echo "🟡 B" ;; 3) echo "🟠 C" ;;
+              4) echo "🔴 D" ;; 5) echo "🔴 E" ;; *)  echo "—"   ;;
+            esac
+          }
+
+          fmt_number() {
+            # Add thousands separators using awk (portable)
+            echo "$1" | awk '{ printf "%\047d\n", $1 }' 2>/dev/null || echo "$1"
+          }
+
+          # Determine overall pass/fail
+          OVERALL_PASS=true
+          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
+            [ "$r" = "failure" ] || [ "$r" = "cancelled" ] && OVERALL_PASS=false && break
           done
+          [ "$OVERALL_PASS" = "true" ] && OVERALL_ICON="✅ All checks passed" || OVERALL_ICON="❌ One or more checks failed"
 
-          # ── Write GitHub Step Summary ──────────────────────────────────
+          # ────────────────────────────────────────────────────────────────
+          # Header
+          # ────────────────────────────────────────────────────────────────
           {
-            echo "## Orion CI Report — ${OVERALL}"
+            echo "## ${OVERALL_ICON}"
             echo ""
-            echo "| | Check | Result |"
-            echo "|---|---|---|"
-            echo "| 🔐 | Secret Scanning (Gitleaks) | $(status_icon "${RESULT_SECRET}") |"
-
-            if [ "${RESULT_SONAR}" = "skipped" ]; then
-              echo "| 🔍 | SonarCloud Code Quality | ⏭️ Skipped (no project key) |"
-            else
-              echo "| 🔍 | SonarCloud Code Quality | $(status_icon "${RESULT_SONAR}") |"
-            fi
-
-            if [ "${RESULT_LICENSE}" = "skipped" ]; then
-              echo "| ⚖️ | License Compliance | ⏭️ Skipped (release event) |"
-            else
-              echo "| ⚖️ | License Compliance | $(status_icon "${RESULT_LICENSE}") |"
-            fi
-
-            if [ "${RESULT_RELEASE}" = "skipped" ]; then
-              echo "| 🏷️ | Release Please | ⏭️ Skipped (not a main branch push, or no release-type set) |"
-            elif [ "${RELEASE_CREATED}" = "true" ]; then
-              echo "| 🏷️ | Release Please | ✅ Release **${RELEASE_TAG}** created |"
-            else
-              echo "| 🏷️ | Release Please | $(status_icon "${RESULT_RELEASE}") (no release this run) |"
-            fi
-
-            if [ "${RESULT_SBOM}" = "skipped" ]; then
-              echo "| 📦 | SBOM Generation | ⏭️ Skipped (only runs on main push / release) |"
-            else
-              echo "| 📦 | SBOM Generation | $(status_icon "${RESULT_SBOM}") |"
-            fi
-
+            echo "| Field | |"
+            echo "|---|---|"
+            echo "| **Trigger** | \`${EVENT}\` on \`${REF}\` |"
+            echo "| **Commit** | [\`${SHA_SHORT}\`](${SERVER_URL}/${REPO}/commit/${SHA}) |"
+            echo "| **Run** | [View full run](${RUN_URL}) |"
             echo ""
             echo "---"
             echo ""
-            echo "**Trigger:** \`${EVENT}\` on \`${REF}\`"
-            echo "**Commit:** \`${SHA:0:7}\`"
-            echo "**Run:** [View full run](${RUN_URL})"
-
-            if [ "${RELEASE_CREATED}" = "true" ]; then
-              echo ""
-              echo "> 🚀 **New release created:** \`${RELEASE_TAG}\` (v${RELEASE_VERSION})"
-            fi
-
           } >> "$GITHUB_STEP_SUMMARY"
 
+          # ────────────────────────────────────────────────────────────────
+          # 1. Secret Scanning
+          # ────────────────────────────────────────────────────────────────
+          {
+            echo "### 🔐 Secret Scanning (Gitleaks)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          GITLEAKS_FILE="./reports/gitleaks/gitleaks-full-report.json"
+          if [ "$RESULT_SECRET" = "skipped" ]; then
+            echo "⏭️ _Skipped_" >> "$GITHUB_STEP_SUMMARY"
+
+          elif [ -f "$GITLEAKS_FILE" ]; then
+            SCAN_TYPE=$(jq -r '.meta.scan_type // "unknown"'   "$GITLEAKS_FILE")
+            GL_VER=$(jq    -r '.meta.gitleaks_version // ""'   "$GITLEAKS_FILE")
+            FINDING_COUNT=$(jq '.findings | length'            "$GITLEAKS_FILE" 2>/dev/null || echo 0)
+
+            {
+              if [ "$FINDING_COUNT" -eq 0 ]; then
+                echo "**Status: ✅ No secrets detected**"
+              else
+                echo "**Status: ❌ ${FINDING_COUNT} secret(s) detected — rotate credentials immediately**"
+              fi
+              echo ""
+              echo "> Scan type: \`${SCAN_TYPE}\` | Gitleaks \`${GL_VER}\`"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "$FINDING_COUNT" -gt 0 ]; then
+              {
+                echo "| File | Line | Rule | Commit |"
+                echo "|------|------|------|--------|"
+                # Secret values are redacted by --redact flag in gitleaks
+                jq -r '.findings[] |
+                  "| `\(.File // "unknown")` | \(.StartLine // "—") | \(.RuleID // "—") | `\(.Commit[:7] // "—")` |"
+                ' "$GITLEAKS_FILE" | head -20
+                TOTAL=$(jq '.findings | length' "$GITLEAKS_FILE")
+                [ "$TOTAL" -gt 20 ] && echo "" && echo "_...and $((TOTAL - 20)) more. Download the \`gitleaks-report\` artifact for the full list._"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "$(status_icon "$RESULT_SECRET") _(report artifact not available)_" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ────────────────────────────────────────────────────────────────
+          # 2. SonarCloud
+          # ────────────────────────────────────────────────────────────────
+          {
+            echo "### 🔍 SonarCloud Code Quality"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RESULT_SONAR" = "skipped" ]; then
+            echo "⏭️ _Skipped — no \`sonar-project-key\` configured_" >> "$GITHUB_STEP_SUMMARY"
+
+          elif [ -n "$PROJECT_KEY" ] && [ -n "$SONAR_TOKEN" ]; then
+            SONAR_URL="https://sonarcloud.io"
+
+            # Fetch Quality Gate status
+            QG=$(curl -sf \
+              -H "Authorization: Bearer ${SONAR_TOKEN}" \
+              "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" \
+              2>/dev/null || echo '{}')
+
+            # Fetch component measures
+            METRIC_KEYS="bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,ncloc,sqale_index,reliability_rating,security_rating,sqale_rating,new_bugs,new_vulnerabilities,new_code_smells,new_coverage,new_security_hotspots,new_security_review_rating"
+            MEASURES=$(curl -sf \
+              -H "Authorization: Bearer ${SONAR_TOKEN}" \
+              "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}" \
+              2>/dev/null || echo '{}')
+
+            # Helper: extract a measure value
+            m() { echo "$MEASURES" | jq -r --arg k "$1" '.component.measures[] | select(.metric==$k) | (.periods[0].value // .value) // "N/A"' 2>/dev/null || echo "N/A"; }
+
+            QG_STATUS=$(echo "$QG" | jq -r '.projectStatus.status // "UNKNOWN"')
+            [ "$QG_STATUS" = "OK" ] && QG_ICON="✅ Passed" || QG_ICON="❌ Failed"
+
+            BUGS=$(m "bugs");                    REL_RATING=$(m "reliability_rating")
+            VULNS=$(m "vulnerabilities");        SEC_RATING=$(m "security_rating")
+            SMELLS=$(m "code_smells");           MNT_RATING=$(m "sqale_rating")
+            COVERAGE=$(m "coverage")
+            DUPLICATIONS=$(m "duplicated_lines_density")
+            HOTSPOTS=$(m "security_hotspots")
+            NCLOC=$(m "ncloc")
+
+            NEW_BUGS=$(m "new_bugs");            NEW_VULNS=$(m "new_vulnerabilities")
+            NEW_SMELLS=$(m "new_code_smells");   NEW_COV=$(m "new_coverage")
+            NEW_HOTSPOTS=$(m "new_security_hotspots")
+
+            {
+              echo "**Quality Gate: ${QG_ICON}** | [View in SonarCloud](${SONAR_URL}/project/overview?id=${PROJECT_KEY})"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # Failed conditions block (only shown if QG failed)
+            FAILED_CONDS=$(echo "$QG" | jq -r '
+              .projectStatus.conditions[]? |
+              select(.status == "ERROR") |
+              "| \(.metricKey) | \(.actualValue) | \(.comparator) \(.errorThreshold) |"
+            ' 2>/dev/null || true)
+
+            if [ -n "$FAILED_CONDS" ]; then
+              {
+                echo "<details><summary>❌ Failed Quality Gate conditions</summary>"
+                echo ""
+                echo "| Metric | Actual | Threshold |"
+                echo "|--------|--------|-----------|"
+                echo "$FAILED_CONDS"
+                echo ""
+                echo "</details>"
+                echo ""
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            # Overall metrics table
+            {
+              echo "#### Overall Code"
+              echo ""
+              echo "| Metric | Value | Rating |"
+              echo "|--------|-------|--------|"
+              echo "| 🐛 Bugs | ${BUGS} | $(rating_badge "$REL_RATING") |"
+              echo "| 🔒 Vulnerabilities | ${VULNS} | $(rating_badge "$SEC_RATING") |"
+              echo "| 🔥 Security Hotspots | ${HOTSPOTS} | — |"
+              echo "| 🧹 Code Smells | ${SMELLS} | $(rating_badge "$MNT_RATING") |"
+              [ "$COVERAGE"     != "N/A" ] && echo "| 📊 Coverage | ${COVERAGE}% | — |"
+              [ "$DUPLICATIONS" != "N/A" ] && echo "| 🔄 Duplications | ${DUPLICATIONS}% | — |"
+              [ "$NCLOC"        != "N/A" ] && echo "| 📝 Lines of Code | $(fmt_number "$NCLOC") | — |"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # New code metrics (only shown if data is available)
+            HAS_NEW_DATA=false
+            for v in "$NEW_BUGS" "$NEW_VULNS" "$NEW_SMELLS" "$NEW_COV" "$NEW_HOTSPOTS"; do
+              [ "$v" != "N/A" ] && HAS_NEW_DATA=true && break
+            done
+
+            if [ "$HAS_NEW_DATA" = "true" ]; then
+              {
+                echo "#### New Code"
+                echo ""
+                echo "| Metric | Value |"
+                echo "|--------|-------|"
+                [ "$NEW_BUGS"     != "N/A" ] && echo "| 🐛 New Bugs | ${NEW_BUGS} |"
+                [ "$NEW_VULNS"    != "N/A" ] && echo "| 🔒 New Vulnerabilities | ${NEW_VULNS} |"
+                [ "$NEW_SMELLS"   != "N/A" ] && echo "| 🧹 New Code Smells | ${NEW_SMELLS} |"
+                [ "$NEW_COV"      != "N/A" ] && echo "| 📊 New Coverage | ${NEW_COV}% |"
+                [ "$NEW_HOTSPOTS" != "N/A" ] && echo "| 🔥 New Security Hotspots | ${NEW_HOTSPOTS} |"
+                echo ""
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+          else
+            echo "$(status_icon "$RESULT_SONAR") _(SonarCloud token or project key not available for API query)_" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ────────────────────────────────────────────────────────────────
+          # 3. License Compliance
+          # ────────────────────────────────────────────────────────────────
+          {
+            echo "### ⚖️ License Compliance (Trivy)"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          LICENSE_FILE="./reports/license/license-report.json"
+          if [ "$RESULT_LICENSE" = "skipped" ]; then
+            echo "⏭️ _Skipped (release event — no new dependencies introduced)_" >> "$GITHUB_STEP_SUMMARY"
+
+          elif [ -f "$LICENSE_FILE" ]; then
+            TOTAL_PKGS=$(jq '.meta.total_packages // 0'   "$LICENSE_FILE" 2>/dev/null || echo 0)
+            VIOLATION_COUNT=$(jq '.meta.violation_count // 0' "$LICENSE_FILE" 2>/dev/null || echo 0)
+
+            {
+              if [ "$VIOLATION_COUNT" -eq 0 ]; then
+                echo "**Status: ✅ No violations detected** (${TOTAL_PKGS} packages scanned)"
+              else
+                echo "**Status: ❌ ${VIOLATION_COUNT} violation(s) detected** (${TOTAL_PKGS} packages scanned)"
+              fi
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "$VIOLATION_COUNT" -gt 0 ]; then
+              {
+                echo "| Package | License | Severity | Source File |"
+                echo "|---------|---------|----------|-------------|"
+                jq -r '
+                  .results[]? |
+                  .Target as $target |
+                  .Licenses[]? |
+                  select(.Category == "forbidden") |
+                  "| `\(.PkgName // "unknown")` | \(.Name) | \(.Severity) | `\($target)` |"
+                ' "$LICENSE_FILE" | head -25
+                TOTAL=$(jq '[.results[]?.Licenses[]? | select(.Category == "forbidden")] | length' "$LICENSE_FILE" 2>/dev/null || echo 0)
+                [ "$TOTAL" -gt 25 ] && echo "" && echo "_...and $((TOTAL - 25)) more. Download the \`license-report\` artifact for the full list._"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            # Show all unique licenses in use (collapsed)
+            ALL_LICENSES=$(jq -r '[.results[]?.Licenses[]?.Name] | unique | .[]' "$LICENSE_FILE" 2>/dev/null | head -30 | tr '\n' ' ')
+            if [ -n "$ALL_LICENSES" ]; then
+              {
+                echo ""
+                echo "<details><summary>All licences in use</summary>"
+                echo ""
+                echo "\`${ALL_LICENSES}\`"
+                echo ""
+                echo "</details>"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "$(status_icon "$RESULT_LICENSE") _(report artifact not available)_" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ────────────────────────────────────────────────────────────────
+          # 4. Release Please
+          # ────────────────────────────────────────────────────────────────
+          {
+            echo "### 🏷️ Release Please"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RESULT_RELEASE" = "skipped" ]; then
+            {
+              echo "⏭️ _Skipped_"
+              echo ""
+              if [ "${{ inputs.release-type }}" = "" ]; then
+                echo "> No \`release-type\` configured for this repository."
+              else
+                echo "> Only runs on push to \`${{ inputs.main-branch }}\`."
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$RELEASE_CREATED" = "true" ]; then
+            {
+              echo "**🚀 Release created: [\`${RELEASE_TAG}\`](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG})**"
+              echo ""
+              echo "| Field | Value |"
+              echo "|-------|-------|"
+              echo "| Version | \`${RELEASE_VERSION}\` |"
+              echo "| Tag | \`${RELEASE_TAG}\` |"
+              echo "| Release notes | [${RELEASE_TAG}](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG}) |"
+              echo "| SBOM | Attached to release assets |"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "$(status_icon "$RESULT_RELEASE")"
+              echo ""
+              echo "> No release created this run — Release PR may be open and waiting for merge."
+              echo "> [View open Release PRs](${SERVER_URL}/${REPO}/pulls?q=is%3Aopen+label%3Autorelease%3Apending)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ────────────────────────────────────────────────────────────────
+          # 5. SBOM
+          # ────────────────────────────────────────────────────────────────
+          {
+            echo "### 📦 SBOM Generation"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$RESULT_SBOM" = "skipped" ]; then
+            echo "⏭️ _Skipped — only runs on push to \`${{ inputs.main-branch }}\` or release events_" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "$(status_icon "$RESULT_SBOM")"
+              echo ""
+              echo "| Format | Artifact |"
+              echo "|--------|----------|"
+              echo "| SPDX JSON | \`sbom-spdx.json\` |"
+              echo "| CycloneDX JSON | \`sbom-cyclonedx.json\` |"
+              if [ "$RELEASE_CREATED" = "true" ]; then
+                echo ""
+                echo "> Both files attached to [Release ${RELEASE_TAG}](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG})."
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # ────────────────────────────────────────────────────────────────
+          # Summary table
+          # ────────────────────────────────────────────────────────────────
+          {
+            echo "### Summary"
+            echo ""
+            echo "| Check | Result |"
+            echo "|-------|--------|"
+            echo "| 🔐 Secret Scanning | $(status_icon "$RESULT_SECRET") |"
+            echo "| 🔍 SonarCloud | $(status_icon "$RESULT_SONAR") |"
+            echo "| ⚖️ License Compliance | $(status_icon "$RESULT_LICENSE") |"
+            echo "| 🏷️ Release Please | $([ "$RELEASE_CREATED" = "true" ] && echo "🚀 Released ${RELEASE_TAG}" || status_icon "$RESULT_RELEASE") |"
+            echo "| 📦 SBOM | $(status_icon "$RESULT_SBOM") |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Fail the step (and the workflow) if any check failed ─────────────
       - name: Fail if any check failed
         shell: bash
         env:
@@ -333,14 +623,11 @@ jobs:
           RESULT_SBOM:    ${{ needs.sbom.result }}
         run: |
           FAILED=false
-          for result in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
-            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
-              FAILED=true
-              break
-            fi
+          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
+            { [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; } && FAILED=true && break
           done
           if [ "$FAILED" = "true" ]; then
-            echo "One or more CI checks failed. See the report above for details."
+            echo "One or more CI checks failed — see the report above for details."
             exit 1
           fi
-          echo "All CI checks passed."
+          echo "All active CI checks passed."
