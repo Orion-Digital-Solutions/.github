@@ -232,22 +232,24 @@ jobs:
         if: always()
         shell: bash
         env:
-          RESULT_SONAR: ${{ needs.sonarcloud.result }}
-          SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}
-          PROJECT_KEY:  ${{ inputs.sonar-project-key }}
+          RESULT_SONAR:           ${{ needs.sonarcloud.result }}
+          SONAR_TOKEN:            ${{ secrets.SONAR_TOKEN }}
+          SONAR_ISSUE_RETRIEVAL:  ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+          PROJECT_KEY:            ${{ inputs.sonar-project-key }}
         run: |
           set -uo pipefail
           SONAR_URL="https://sonarcloud.io"
           QG='{}'; MEASURES='{}'; ISSUES='{}'; HOTSPOT_DATA='{}'; QG_STATUS="UNKNOWN"
 
-          if [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_TOKEN:-}" ] && [ "${RESULT_SONAR}" != "skipped" ]; then
+          if [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_TOKEN:-}" ] && [ -n "${SONAR_ISSUE_RETRIEVAL:-}" ] && [ "${RESULT_SONAR}" != "skipped" ]; then
 
             # Retry helper — retries up to 3 times with 5s backoff; returns '{}' on failure
+            # Uses SONAR_ISSUE_RETRIEVAL token for read-only data retrieval API calls
             sonar_api() {
               local url="$1" attempt body http_code
               for attempt in 1 2 3; do
                 body=$(curl -s --max-time 15 -w '\n%{http_code}' \
-                  -H "Authorization: Bearer ${SONAR_TOKEN}" "$url" 2>/dev/null || true)
+                  -H "Authorization: Bearer ${SONAR_ISSUE_RETRIEVAL}" "$url" 2>/dev/null || true)
                 http_code=$(echo "$body" | tail -1)
                 body=$(echo "$body" | sed '$d')
                 if [ "$http_code" = "200" ] && echo "$body" | jq . >/dev/null 2>&1; then
@@ -264,7 +266,7 @@ jobs:
             echo "Polling SonarCloud for analysis processing completion..."
             for i in $(seq 1 18); do
               TASK_STATUS=$(curl -sf --max-time 10 \
-                -H "Authorization: Bearer ${SONAR_TOKEN}" \
+                -H "Authorization: Bearer ${SONAR_ISSUE_RETRIEVAL}" \
                 "${SONAR_URL}/api/ce/component?component=${PROJECT_KEY}" \
                 2>/dev/null | jq -r '.current.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
               echo "  attempt $i — task status: ${TASK_STATUS}"
@@ -483,12 +485,12 @@ jobs:
         if: always()
         shell: bash
         env:
-          RESULT_SONAR: ${{ needs.sonarcloud.result }}
-          PROJECT_KEY:  ${{ inputs.sonar-project-key }}
-          SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}
-          REPO:         ${{ github.repository }}
-          SERVER_URL:   ${{ github.server_url }}
-          SHA:          ${{ github.sha }}
+          RESULT_SONAR:          ${{ needs.sonarcloud.result }}
+          PROJECT_KEY:           ${{ inputs.sonar-project-key }}
+          SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+          REPO:                  ${{ github.repository }}
+          SERVER_URL:            ${{ github.server_url }}
+          SHA:                   ${{ github.sha }}
         run: |
           set -uo pipefail
           SONAR_URL="https://sonarcloud.io"
@@ -532,8 +534,8 @@ jobs:
 
             if [ "$RESULT_SONAR" = "skipped" ]; then
               echo "⏭️ _Skipped — no \`sonar-project-key\` configured_"
-            elif [ -z "${PROJECT_KEY:-}" ] || [ -z "${SONAR_TOKEN:-}" ]; then
-              echo "$([ "$RESULT_SONAR" = "success" ] && echo "✅" || echo "⚠️") _SonarCloud credentials not available in report step — check \`SONAR_TOKEN\` secret and \`sonar-project-key\` input_"
+            elif [ -z "${PROJECT_KEY:-}" ] || [ -z "${SONAR_ISSUE_RETRIEVAL:-}" ]; then
+              echo "$([ "$RESULT_SONAR" = "success" ] && echo "✅" || echo "⚠️") _SonarCloud data not available in report step — check \`SONAR_ISSUE_RETRIEVAL\` secret and \`sonar-project-key\` input_"
             else
               QG_STATUS="${QG_STATUS:-UNKNOWN}"
               [ "$QG_STATUS" = "OK" ] && QG_ICON="✅ Passed" || QG_ICON="❌ Failed"
