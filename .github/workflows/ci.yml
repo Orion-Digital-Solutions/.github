@@ -200,7 +200,7 @@ jobs:
     secrets: inherit
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FINAL — Detailed consolidated report (always runs)
+# FINAL — Detailed consolidated report (always runs, never fails itself)
 # ─────────────────────────────────────────────────────────────────────────────
 
   report:
@@ -248,8 +248,13 @@ jobs:
           REPO:             ${{ github.repository }}
           RUN_ID:           ${{ github.run_id }}
           SERVER_URL:       ${{ github.server_url }}
+          RUNNER_NAME:      ${{ inputs.runner }}
         run: |
-          set -euo pipefail
+          # -e removed intentionally: each section handles its own errors so one
+          # failed API call cannot prevent the rest of the report from rendering.
+          set -uo pipefail
+
+          REPORT_START=$SECONDS
           RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
           SHA_SHORT="${SHA:0:7}"
 
@@ -267,7 +272,6 @@ jobs:
           }
 
           rating_badge() {
-            # Converts SonarCloud numeric rating (1-5) to letter badge
             case "${1%.*}" in
               1) echo "🟢 A" ;; 2) echo "🟡 B" ;; 3) echo "🟠 C" ;;
               4) echo "🔴 D" ;; 5) echo "🔴 E" ;; *)  echo "—"   ;;
@@ -275,51 +279,163 @@ jobs:
           }
 
           fmt_number() {
-            # Add thousands separators using awk (portable)
             echo "$1" | awk '{ printf "%\047d\n", $1 }' 2>/dev/null || echo "$1"
           }
 
-          # Determine overall pass/fail
-          OVERALL_PASS=true
-          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
-            [ "$r" = "failure" ] || [ "$r" = "cancelled" ] && OVERALL_PASS=false && break
-          done
-          [ "$OVERALL_PASS" = "true" ] && OVERALL_ICON="✅ All checks passed" || OVERALL_ICON="❌ One or more checks failed"
+          # Convert minutes (sqale_index) to human-readable debt string
+          fmt_debt() {
+            local mins="$1"
+            if ! echo "$mins" | grep -qE '^[0-9]+$'; then echo "—"; return; fi
+            local days=$(( mins / 480 ))
+            local hrs=$(( (mins % 480) / 60 ))
+            local rem=$(( mins % 60 ))
+            local out=""
+            [ "$days" -gt 0 ] && out="${days}d "
+            [ "$hrs"  -gt 0 ] && out="${out}${hrs}h "
+            [ "$rem"  -gt 0 ] && out="${out}${rem}min"
+            out="${out%% }"
+            echo "${out:-< 1min}"
+          }
+
+          # One-line detail string per stage for the dashboard table
+          secret_detail() {
+            local f="./reports/gitleaks/gitleaks-full-report.json"
+            [ "$RESULT_SECRET" = "skipped"   ] && echo "Skipped" && return
+            [ ! -f "$f"                       ] && echo "Report artifact unavailable" && return
+            local n; n=$(jq '.findings | length' "$f" 2>/dev/null || echo 0)
+            [ "$n" -eq 0 ] && echo "No secrets detected" || echo "${n} secret(s) found — rotate credentials"
+          }
+
+          sonar_detail() {
+            [ "$RESULT_SONAR" = "skipped" ] && echo "Skipped — no project key configured" && return
+            [ -z "${PROJECT_KEY:-}" ] || [ -z "${SONAR_TOKEN:-}" ] && echo "Token or project key unavailable" && return
+            local qs; qs=$(echo "${QG_STATUS:-UNKNOWN}")
+            [ "$qs" = "OK" ] && echo "Quality Gate passed" || echo "Quality Gate failed"
+          }
+
+          license_detail() {
+            local f="./reports/license/license-report.json"
+            [ "$RESULT_LICENSE" = "skipped" ] && echo "Skipped (release event)" && return
+            [ ! -f "$f" ] && echo "Report artifact unavailable" && return
+            local v t
+            v=$(jq '.meta.violation_count // 0' "$f" 2>/dev/null || echo 0)
+            t=$(jq '.meta.total_packages  // 0' "$f" 2>/dev/null || echo 0)
+            [ "$v" -eq 0 ] && echo "No violations (${t} packages scanned)" || echo "${v} violation(s) in ${t} packages"
+          }
+
+          release_detail() {
+            [ "$RESULT_RELEASE" = "skipped"       ] && echo "Skipped" && return
+            [ "${RELEASE_CREATED:-}" = "true"      ] && echo "Released ${RELEASE_TAG}" && return
+            [ "$RESULT_RELEASE"  = "success"       ] && echo "No release created — PR may be pending" && return
+            status_icon "$RESULT_RELEASE"
+          }
+
+          sbom_detail() {
+            [ "$RESULT_SBOM" = "skipped" ] && echo "Skipped — only runs on push to main or release" && return
+            [ "$RESULT_SBOM" = "success" ] && echo "SPDX + CycloneDX generated" && return
+            status_icon "$RESULT_SBOM"
+          }
 
           # ────────────────────────────────────────────────────────────────
-          # Header
+          # Pre-fetch SonarCloud data (needed by both header detail and body)
           # ────────────────────────────────────────────────────────────────
-          {
-            echo "## ${OVERALL_ICON}"
+          QG='{}'
+          MEASURES='{}'
+          ISSUES='{}'
+          HOTSPOT_DATA='{}'
+          QG_STATUS="UNKNOWN"
+
+          if [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_TOKEN:-}" ] && [ "$RESULT_SONAR" != "skipped" ]; then
+            SONAR_URL="https://sonarcloud.io"
+
+            QG=$(curl -sf --max-time 15 \
+              -H "Authorization: Bearer ${SONAR_TOKEN}" \
+              "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" \
+              2>/dev/null || echo '{}')
+
+            METRIC_KEYS="bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,ncloc,sqale_index,reliability_rating,security_rating,sqale_rating,new_bugs,new_vulnerabilities,new_code_smells,new_coverage,new_security_hotspots,new_security_review_rating"
+            MEASURES=$(curl -sf --max-time 15 \
+              -H "Authorization: Bearer ${SONAR_TOKEN}" \
+              "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}" \
+              2>/dev/null || echo '{}')
+
+            ISSUES=$(curl -sf --max-time 15 \
+              -H "Authorization: Bearer ${SONAR_TOKEN}" \
+              "${SONAR_URL}/api/issues/search?componentKeys=${PROJECT_KEY}&statuses=OPEN,CONFIRMED,REOPENED&ps=15&s=SEVERITY&asc=false&facets=types,severities" \
+              2>/dev/null || echo '{}')
+
+            HOTSPOT_DATA=$(curl -sf --max-time 15 \
+              -H "Authorization: Bearer ${SONAR_TOKEN}" \
+              "${SONAR_URL}/api/hotspots/search?projectKey=${PROJECT_KEY}&ps=10&status=TO_REVIEW" \
+              2>/dev/null || echo '{}')
+
+            QG_STATUS=$(echo "$QG" | jq -r '.projectStatus.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+          fi
+
+          # Measure extractor (uses pre-fetched $MEASURES)
+          m() { echo "$MEASURES" | jq -r --arg k "$1" \
+            '.component.measures[] | select(.metric==$k) | (.periods[0].value // .value) // "N/A"' \
+            2>/dev/null || echo "N/A"; }
+
+          # ────────────────────────────────────────────────────────────────
+          # Determine overall pass/fail
+          # ────────────────────────────────────────────────────────────────
+          OVERALL_PASS=true
+          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
+            { [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; } && OVERALL_PASS=false && break
+          done
+
+          if [ "$OVERALL_PASS" = "true" ]; then
+            OVERALL_BANNER="## ✅ Orion CI — All Checks Passed"
+          else
+            OVERALL_BANNER="## ❌ Orion CI — One or More Checks Failed"
+          fi
+
+          # ────────────────────────────────────────────────────────────────
+          # HEADER — run metadata + dashboard table
+          # ────────────────────────────────────────────────────────────────
+          (
+            echo "${OVERALL_BANNER}"
             echo ""
-            echo "| Field | |"
+            echo "| | |"
             echo "|---|---|"
             echo "| **Trigger** | \`${EVENT}\` on \`${REF}\` |"
             echo "| **Commit** | [\`${SHA_SHORT}\`](${SERVER_URL}/${REPO}/commit/${SHA}) |"
+            echo "| **Runner** | \`${RUNNER_NAME}\` |"
             echo "| **Run** | [View full run](${RUN_URL}) |"
+            echo ""
+            echo "### Pipeline Dashboard"
+            echo ""
+            echo "| Stage | Status | Details |"
+            echo "|-------|--------|---------|"
+            echo "| 🔐 Secret Scanning | $(status_icon "$RESULT_SECRET") | $(secret_detail) |"
+            echo "| 🔍 SonarCloud | $([ "$QG_STATUS" = "OK" ] && echo "✅ Passed" || { [ "$RESULT_SONAR" = "skipped" ] && echo "⏭️ Skipped" || echo "❌ Failed"; }) | $(sonar_detail) |"
+            echo "| ⚖️ License Compliance | $(status_icon "$RESULT_LICENSE") | $(license_detail) |"
+            echo "| 🏷️ Release Please | $([ "${RELEASE_CREATED:-}" = "true" ] && echo "🚀 Released" || status_icon "$RESULT_RELEASE") | $(release_detail) |"
+            echo "| 📦 SBOM | $(status_icon "$RESULT_SBOM") | $(sbom_detail) |"
+            echo ""
+            echo "**Quick navigation:** [Secret Scanning](#-secret-scanning-gitleaks) · [SonarCloud](#-sonarcloud-code-quality) · [License Compliance](#️-license-compliance-trivy) · [Release Please](#️-release-please) · [SBOM](#-sbom-generation)"
             echo ""
             echo "---"
             echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
+          ) >> "$GITHUB_STEP_SUMMARY" || echo "_Header section failed to render_" >> "$GITHUB_STEP_SUMMARY"
 
           # ────────────────────────────────────────────────────────────────
           # 1. Secret Scanning
           # ────────────────────────────────────────────────────────────────
-          {
+          (
+            GITLEAKS_FILE="./reports/gitleaks/gitleaks-full-report.json"
+
             echo "### 🔐 Secret Scanning (Gitleaks)"
             echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
 
-          GITLEAKS_FILE="./reports/gitleaks/gitleaks-full-report.json"
-          if [ "$RESULT_SECRET" = "skipped" ]; then
-            echo "⏭️ _Skipped_" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$RESULT_SECRET" = "skipped" ]; then
+              echo "⏭️ _Skipped_"
+            elif [ -f "$GITLEAKS_FILE" ]; then
+              SCAN_TYPE=$(jq -r '.meta.scan_type // "unknown"' "$GITLEAKS_FILE" 2>/dev/null || echo "unknown")
+              GL_VER=$(jq    -r '.meta.gitleaks_version // ""'  "$GITLEAKS_FILE" 2>/dev/null || echo "")
+              FINDING_COUNT=$(jq '.findings | length'           "$GITLEAKS_FILE" 2>/dev/null || echo 0)
 
-          elif [ -f "$GITLEAKS_FILE" ]; then
-            SCAN_TYPE=$(jq -r '.meta.scan_type // "unknown"'   "$GITLEAKS_FILE")
-            GL_VER=$(jq    -r '.meta.gitleaks_version // ""'   "$GITLEAKS_FILE")
-            FINDING_COUNT=$(jq '.findings | length'            "$GITLEAKS_FILE" 2>/dev/null || echo 0)
-
-            {
               if [ "$FINDING_COUNT" -eq 0 ]; then
                 echo "**Status: ✅ No secrets detected**"
               else
@@ -328,101 +444,77 @@ jobs:
               echo ""
               echo "> Scan type: \`${SCAN_TYPE}\` | Gitleaks \`${GL_VER}\`"
               echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
 
-            if [ "$FINDING_COUNT" -gt 0 ]; then
-              {
-                echo "| File | Line | Rule | Commit |"
-                echo "|------|------|------|--------|"
-                # Secret values are redacted by --redact flag in gitleaks
+              if [ "$FINDING_COUNT" -gt 0 ]; then
+                echo "| Severity | File | Line | Rule | Description | Commit |"
+                echo "|----------|------|------|------|-------------|--------|"
                 jq -r '.findings[] |
-                  "| `\(.File // "unknown")` | \(.StartLine // "—") | \(.RuleID // "—") | `\(.Commit[:7] // "—")` |"
-                ' "$GITLEAKS_FILE" | head -20
-                TOTAL=$(jq '.findings | length' "$GITLEAKS_FILE")
+                  "| \(.Tags // ["UNKNOWN"] | if type == "array" then .[0] else . end) | `\(.File // "unknown")` | \(.StartLine // "—") | `\(.RuleID // "—")` | \(.Description // "—" | gsub("[|]"; "\\|") | .[0:80]) | [`\(.Commit[:7] // "—")`](${{ github.server_url }}/${{ github.repository }}/commit/\(.Commit // "")) |"
+                ' "$GITLEAKS_FILE" 2>/dev/null | head -20
+                TOTAL=$(jq '.findings | length' "$GITLEAKS_FILE" 2>/dev/null || echo 0)
                 [ "$TOTAL" -gt 20 ] && echo "" && echo "_...and $((TOTAL - 20)) more. Download the \`gitleaks-report\` artifact for the full list._"
-              } >> "$GITHUB_STEP_SUMMARY"
+                echo ""
+                echo "> **Remediation:** Rotate any exposed credentials immediately."
+                echo "> Remove secrets from git history using [\`git filter-repo\`](https://github.com/newren/git-filter-repo)."
+                echo "> If a finding is a false positive, add it to \`.gitleaks.toml\` in your repository root."
+              fi
+            else
+              echo "$(status_icon "$RESULT_SECRET") _(report artifact not available)_"
             fi
-          else
-            echo "$(status_icon "$RESULT_SECRET") _(report artifact not available)_" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "---"
+            echo ""
+          ) >> "$GITHUB_STEP_SUMMARY" || echo "_Secret scanning section failed to render_" >> "$GITHUB_STEP_SUMMARY"
 
           # ────────────────────────────────────────────────────────────────
           # 2. SonarCloud
           # ────────────────────────────────────────────────────────────────
-          {
+          (
             echo "### 🔍 SonarCloud Code Quality"
             echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$RESULT_SONAR" = "skipped" ]; then
-            echo "⏭️ _Skipped — no \`sonar-project-key\` configured_" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$RESULT_SONAR" = "skipped" ]; then
+              echo "⏭️ _Skipped — no \`sonar-project-key\` configured_"
+            elif [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_TOKEN:-}" ]; then
+              [ "$QG_STATUS" = "OK" ] && QG_ICON="✅ Passed" || QG_ICON="❌ Failed"
 
-          elif [ -n "$PROJECT_KEY" ] && [ -n "$SONAR_TOKEN" ]; then
-            SONAR_URL="https://sonarcloud.io"
+              BUGS=$(m "bugs");                    REL_RATING=$(m "reliability_rating")
+              VULNS=$(m "vulnerabilities");        SEC_RATING=$(m "security_rating")
+              SMELLS=$(m "code_smells");           MNT_RATING=$(m "sqale_rating")
+              COVERAGE=$(m "coverage")
+              DUPLICATIONS=$(m "duplicated_lines_density")
+              HOTSPOTS=$(m "security_hotspots")
+              NCLOC=$(m "ncloc")
+              DEBT_MINS=$(m "sqale_index")
 
-            # Fetch Quality Gate status
-            QG=$(curl -sf \
-              -H "Authorization: Bearer ${SONAR_TOKEN}" \
-              "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" \
-              2>/dev/null || echo '{}')
+              NEW_BUGS=$(m "new_bugs");            NEW_VULNS=$(m "new_vulnerabilities")
+              NEW_SMELLS=$(m "new_code_smells");   NEW_COV=$(m "new_coverage")
+              NEW_HOTSPOTS=$(m "new_security_hotspots")
 
-            # Fetch component measures
-            METRIC_KEYS="bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density,security_hotspots,ncloc,sqale_index,reliability_rating,security_rating,sqale_rating,new_bugs,new_vulnerabilities,new_code_smells,new_coverage,new_security_hotspots,new_security_review_rating"
-            MEASURES=$(curl -sf \
-              -H "Authorization: Bearer ${SONAR_TOKEN}" \
-              "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}" \
-              2>/dev/null || echo '{}')
-
-            # Helper: extract a measure value
-            m() { echo "$MEASURES" | jq -r --arg k "$1" '.component.measures[] | select(.metric==$k) | (.periods[0].value // .value) // "N/A"' 2>/dev/null || echo "N/A"; }
-
-            QG_STATUS=$(echo "$QG" | jq -r '.projectStatus.status // "UNKNOWN"')
-            [ "$QG_STATUS" = "OK" ] && QG_ICON="✅ Passed" || QG_ICON="❌ Failed"
-
-            BUGS=$(m "bugs");                    REL_RATING=$(m "reliability_rating")
-            VULNS=$(m "vulnerabilities");        SEC_RATING=$(m "security_rating")
-            SMELLS=$(m "code_smells");           MNT_RATING=$(m "sqale_rating")
-            COVERAGE=$(m "coverage")
-            DUPLICATIONS=$(m "duplicated_lines_density")
-            HOTSPOTS=$(m "security_hotspots")
-            NCLOC=$(m "ncloc")
-
-            NEW_BUGS=$(m "new_bugs");            NEW_VULNS=$(m "new_vulnerabilities")
-            NEW_SMELLS=$(m "new_code_smells");   NEW_COV=$(m "new_coverage")
-            NEW_HOTSPOTS=$(m "new_security_hotspots")
-
-            {
               echo "**Quality Gate: ${QG_ICON}** | [View in SonarCloud](${SONAR_URL}/project/overview?id=${PROJECT_KEY})"
               echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
 
-            # Failed conditions block (only shown if QG failed)
-            FAILED_CONDS=$(echo "$QG" | jq -r '
-              .projectStatus.conditions[]? |
-              select(.status == "ERROR") |
-              "| \(.metricKey) | \(.actualValue) | \(.comparator) \(.errorThreshold) |"
-            ' 2>/dev/null || true)
+              # ── Failed Quality Gate conditions ───────────────────────────
+              FAILED_CONDS=$(echo "$QG" | jq -r '
+                .projectStatus.conditions[]? |
+                select(.status == "ERROR") |
+                "| \(.metricKey | gsub("_"; " ") | ascii_upcase) | \(.actualValue) | \(.comparator) \(.errorThreshold) |"
+              ' 2>/dev/null || true)
 
-            if [ -n "$FAILED_CONDS" ]; then
-              {
-                echo "<details><summary>❌ Failed Quality Gate conditions</summary>"
+              if [ -n "$FAILED_CONDS" ]; then
+                echo "<details open><summary>❌ Failed Quality Gate Conditions</summary>"
                 echo ""
-                echo "| Metric | Actual | Threshold |"
-                echo "|--------|--------|-----------|"
+                echo "| Metric | Actual Value | Threshold |"
+                echo "|--------|-------------|-----------|"
                 echo "$FAILED_CONDS"
                 echo ""
                 echo "</details>"
                 echo ""
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
+              fi
 
-            # Overall metrics table
-            {
-              echo "#### Overall Code"
+              # ── Overall metrics ──────────────────────────────────────────
+              echo "#### Overall Code Metrics"
               echo ""
               echo "| Metric | Value | Rating |"
               echo "|--------|-------|--------|"
@@ -433,18 +525,17 @@ jobs:
               [ "$COVERAGE"     != "N/A" ] && echo "| 📊 Coverage | ${COVERAGE}% | — |"
               [ "$DUPLICATIONS" != "N/A" ] && echo "| 🔄 Duplications | ${DUPLICATIONS}% | — |"
               [ "$NCLOC"        != "N/A" ] && echo "| 📝 Lines of Code | $(fmt_number "$NCLOC") | — |"
+              [ "$DEBT_MINS"    != "N/A" ] && echo "| 💳 Technical Debt | $(fmt_debt "$DEBT_MINS") | — |"
               echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
 
-            # New code metrics (only shown if data is available)
-            HAS_NEW_DATA=false
-            for v in "$NEW_BUGS" "$NEW_VULNS" "$NEW_SMELLS" "$NEW_COV" "$NEW_HOTSPOTS"; do
-              [ "$v" != "N/A" ] && HAS_NEW_DATA=true && break
-            done
+              # ── New code metrics ─────────────────────────────────────────
+              HAS_NEW_DATA=false
+              for v in "$NEW_BUGS" "$NEW_VULNS" "$NEW_SMELLS" "$NEW_COV" "$NEW_HOTSPOTS"; do
+                [ "$v" != "N/A" ] && HAS_NEW_DATA=true && break
+              done
 
-            if [ "$HAS_NEW_DATA" = "true" ]; then
-              {
-                echo "#### New Code"
+              if [ "$HAS_NEW_DATA" = "true" ]; then
+                echo "#### New Code Metrics"
                 echo ""
                 echo "| Metric | Value |"
                 echo "|--------|-------|"
@@ -454,88 +545,163 @@ jobs:
                 [ "$NEW_COV"      != "N/A" ] && echo "| 📊 New Coverage | ${NEW_COV}% |"
                 [ "$NEW_HOTSPOTS" != "N/A" ] && echo "| 🔥 New Security Hotspots | ${NEW_HOTSPOTS} |"
                 echo ""
-              } >> "$GITHUB_STEP_SUMMARY"
+              fi
+
+              # ── Severity breakdown (from facets) ─────────────────────────
+              SEV_FACET=$(echo "$ISSUES" | jq -r '
+                (.facets // [])[] | select(.property == "severities") |
+                .values[] |
+                "| \(.val) | \(.count) |"
+              ' 2>/dev/null || true)
+
+              if [ -n "$SEV_FACET" ]; then
+                echo "<details><summary>📊 Issue Severity Breakdown</summary>"
+                echo ""
+                echo "| Severity | Count |"
+                echo "|----------|-------|"
+                echo "$SEV_FACET"
+                echo ""
+                echo "</details>"
+                echo ""
+              fi
+
+              # ── Top issues detail table ──────────────────────────────────
+              ISSUE_COUNT=$(echo "$ISSUES" | jq '.issues | length' 2>/dev/null || echo 0)
+              TOTAL_ISSUES=$(echo "$ISSUES" | jq '.total // 0' 2>/dev/null || echo 0)
+
+              if [ "${ISSUE_COUNT:-0}" -gt 0 ]; then
+                echo "<details><summary>🔎 Top Issues (showing up to 15 of ${TOTAL_ISSUES})</summary>"
+                echo ""
+                echo "| Severity | Type | Message | File | Line | Effort |"
+                echo "|----------|------|---------|------|------|--------|"
+                echo "$ISSUES" | jq -r '
+                  .issues[]? |
+                  ( .component | split(":") | last ) as $file |
+                  ( .textRange.startLine // "—" | tostring ) as $line |
+                  ( .effort // "—" ) as $effort |
+                  ( .message | gsub("[|]"; "\\|") | .[0:90] ) as $msg |
+                  "| \(.severity) | \(.type | gsub("_";" ")) | \($msg) | `\($file)` | \($line) | \($effort) |"
+                ' 2>/dev/null | head -15
+                echo ""
+                if [ "${TOTAL_ISSUES:-0}" -gt 15 ]; then
+                  echo "_...and $((TOTAL_ISSUES - 15)) more. [View all issues in SonarCloud](${SONAR_URL}/project/issues?id=${PROJECT_KEY})._"
+                  echo ""
+                fi
+                echo "</details>"
+                echo ""
+              fi
+
+              # ── Security hotspots ────────────────────────────────────────
+              HS_COUNT=$(echo "$HOTSPOT_DATA" | jq '.hotspots | length' 2>/dev/null || echo 0)
+              HS_TOTAL=$(echo "$HOTSPOT_DATA" | jq '.paging.total // 0' 2>/dev/null || echo 0)
+
+              if [ "${HS_COUNT:-0}" -gt 0 ]; then
+                echo "<details><summary>🔥 Security Hotspots Requiring Review (${HS_TOTAL} total)</summary>"
+                echo ""
+                echo "| Probability | Category | Message | File | Line |"
+                echo "|-------------|----------|---------|------|------|"
+                echo "$HOTSPOT_DATA" | jq -r '
+                  .hotspots[]? |
+                  ( .component | split(":") | last ) as $file |
+                  ( .textRange.startLine // "—" | tostring ) as $line |
+                  ( .message | gsub("[|]"; "\\|") | .[0:90] ) as $msg |
+                  "| \(.vulnerabilityProbability) | \(.securityCategory | gsub("-";" ") | ascii_upcase) | \($msg) | `\($file)` | \($line) |"
+                ' 2>/dev/null | head -10
+                echo ""
+                if [ "${HS_TOTAL:-0}" -gt 10 ]; then
+                  echo "_...and $((HS_TOTAL - 10)) more. [Review all hotspots in SonarCloud](${SONAR_URL}/project/security_hotspots?id=${PROJECT_KEY})._"
+                  echo ""
+                fi
+                echo "</details>"
+                echo ""
+              fi
+
+            else
+              echo "$(status_icon "$RESULT_SONAR") _(SonarCloud token or project key not available for API query)_"
             fi
 
-          else
-            echo "$(status_icon "$RESULT_SONAR") _(SonarCloud token or project key not available for API query)_" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "---"
+            echo ""
+          ) >> "$GITHUB_STEP_SUMMARY" || echo "_SonarCloud section failed to render_" >> "$GITHUB_STEP_SUMMARY"
 
           # ────────────────────────────────────────────────────────────────
           # 3. License Compliance
           # ────────────────────────────────────────────────────────────────
-          {
+          (
+            LICENSE_FILE="./reports/license/license-report.json"
+
             echo "### ⚖️ License Compliance (Trivy)"
             echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
 
-          LICENSE_FILE="./reports/license/license-report.json"
-          if [ "$RESULT_LICENSE" = "skipped" ]; then
-            echo "⏭️ _Skipped (release event — no new dependencies introduced)_" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$RESULT_LICENSE" = "skipped" ]; then
+              echo "⏭️ _Skipped (release event — no new dependencies introduced)_"
+            elif [ -f "$LICENSE_FILE" ]; then
+              TOTAL_PKGS=$(jq '.meta.total_packages // 0'     "$LICENSE_FILE" 2>/dev/null || echo 0)
+              VIOLATION_COUNT=$(jq '.meta.violation_count // 0' "$LICENSE_FILE" 2>/dev/null || echo 0)
+              FORBIDDEN_LIST=$(jq -r '(.meta.forbidden_licenses // []) | join(", ")' "$LICENSE_FILE" 2>/dev/null || echo "—")
 
-          elif [ -f "$LICENSE_FILE" ]; then
-            TOTAL_PKGS=$(jq '.meta.total_packages // 0'   "$LICENSE_FILE" 2>/dev/null || echo 0)
-            VIOLATION_COUNT=$(jq '.meta.violation_count // 0' "$LICENSE_FILE" 2>/dev/null || echo 0)
-
-            {
               if [ "$VIOLATION_COUNT" -eq 0 ]; then
                 echo "**Status: ✅ No violations detected** (${TOTAL_PKGS} packages scanned)"
               else
                 echo "**Status: ❌ ${VIOLATION_COUNT} violation(s) detected** (${TOTAL_PKGS} packages scanned)"
               fi
               echo ""
-            } >> "$GITHUB_STEP_SUMMARY"
+              echo "> Forbidden licenses configured: \`${FORBIDDEN_LIST}\`"
+              echo ""
 
-            if [ "$VIOLATION_COUNT" -gt 0 ]; then
-              {
-                echo "| Package | License | Severity | Source File |"
-                echo "|---------|---------|----------|-------------|"
+              if [ "$VIOLATION_COUNT" -gt 0 ]; then
+                echo "| Package | Version | License | Category | Severity | Source File |"
+                echo "|---------|---------|---------|----------|----------|-------------|"
                 jq -r '
                   .results[]? |
                   .Target as $target |
                   .Licenses[]? |
                   select(.Category == "forbidden") |
-                  "| `\(.PkgName // "unknown")` | \(.Name) | \(.Severity) | `\($target)` |"
-                ' "$LICENSE_FILE" | head -25
+                  "| `\(.PkgName // "unknown")` | \(.PkgVersion // "—") | \(.Name) | \(.Category) | \(.Severity // "—") | `\($target)` |"
+                ' "$LICENSE_FILE" 2>/dev/null | head -25
                 TOTAL=$(jq '[.results[]?.Licenses[]? | select(.Category == "forbidden")] | length' "$LICENSE_FILE" 2>/dev/null || echo 0)
                 [ "$TOTAL" -gt 25 ] && echo "" && echo "_...and $((TOTAL - 25)) more. Download the \`license-report\` artifact for the full list._"
-              } >> "$GITHUB_STEP_SUMMARY"
-            fi
+                echo ""
+              fi
 
-            # Show all unique licenses in use (collapsed)
-            ALL_LICENSES=$(jq -r '[.results[]?.Licenses[]?.Name] | unique | .[]' "$LICENSE_FILE" 2>/dev/null | head -30 | tr '\n' ' ')
-            if [ -n "$ALL_LICENSES" ]; then
-              {
+              # ── Full license inventory (collapsed) ───────────────────────
+              ALL_LICENSES=$(jq -r '
+                [.results[]?.Licenses[]? | {name: .Name, cat: (.Category // "unknown")}] |
+                unique_by(.name) |
+                sort_by(.name) |
+                .[] |
+                "| `\(.name)` | \(.cat) |"
+              ' "$LICENSE_FILE" 2>/dev/null | head -60)
+
+              if [ -n "$ALL_LICENSES" ]; then
+                echo "<details><summary>📋 Full License Inventory</summary>"
                 echo ""
-                echo "<details><summary>All licences in use</summary>"
-                echo ""
-                echo "\`${ALL_LICENSES}\`"
+                echo "| License | Category |"
+                echo "|---------|----------|"
+                echo "$ALL_LICENSES"
+                TOTAL_UNIQUE=$(jq '[.results[]?.Licenses[]?.Name] | unique | length' "$LICENSE_FILE" 2>/dev/null || echo "?")
+                [ "$TOTAL_UNIQUE" -gt 60 ] && echo "" && echo "_...and more. Download the \`license-report\` artifact for the complete list._"
                 echo ""
                 echo "</details>"
-              } >> "$GITHUB_STEP_SUMMARY"
+              fi
+            else
+              echo "$(status_icon "$RESULT_LICENSE") _(report artifact not available)_"
             fi
-          else
-            echo "$(status_icon "$RESULT_LICENSE") _(report artifact not available)_" >> "$GITHUB_STEP_SUMMARY"
-          fi
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "---"
+            echo ""
+          ) >> "$GITHUB_STEP_SUMMARY" || echo "_License compliance section failed to render_" >> "$GITHUB_STEP_SUMMARY"
 
           # ────────────────────────────────────────────────────────────────
           # 4. Release Please
           # ────────────────────────────────────────────────────────────────
-          {
+          (
             echo "### 🏷️ Release Please"
             echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$RESULT_RELEASE" = "skipped" ]; then
-            {
+            if [ "$RESULT_RELEASE" = "skipped" ]; then
               echo "⏭️ _Skipped_"
               echo ""
               if [ "${{ inputs.release-type }}" = "" ]; then
@@ -543,9 +709,7 @@ jobs:
               else
                 echo "> Only runs on push to \`${{ inputs.main-branch }}\`."
               fi
-            } >> "$GITHUB_STEP_SUMMARY"
-          elif [ "$RELEASE_CREATED" = "true" ]; then
-            {
+            elif [ "${RELEASE_CREATED:-}" = "true" ]; then
               echo "**🚀 Release created: [\`${RELEASE_TAG}\`](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG})**"
               echo ""
               echo "| Field | Value |"
@@ -554,80 +718,49 @@ jobs:
               echo "| Tag | \`${RELEASE_TAG}\` |"
               echo "| Release notes | [${RELEASE_TAG}](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG}) |"
               echo "| SBOM | Attached to release assets |"
-            } >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
+            else
               echo "$(status_icon "$RESULT_RELEASE")"
               echo ""
               echo "> No release created this run — Release PR may be open and waiting for merge."
               echo "> [View open Release PRs](${SERVER_URL}/${REPO}/pulls?q=is%3Aopen+label%3Autorelease%3Apending)"
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+            fi
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo ""
+            echo "---"
+            echo ""
+          ) >> "$GITHUB_STEP_SUMMARY" || echo "_Release Please section failed to render_" >> "$GITHUB_STEP_SUMMARY"
 
           # ────────────────────────────────────────────────────────────────
           # 5. SBOM
           # ────────────────────────────────────────────────────────────────
-          {
+          (
             echo "### 📦 SBOM Generation"
             echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$RESULT_SBOM" = "skipped" ]; then
-            echo "⏭️ _Skipped — only runs on push to \`${{ inputs.main-branch }}\` or release events_" >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
+            if [ "$RESULT_SBOM" = "skipped" ]; then
+              echo "⏭️ _Skipped — only runs on push to \`${{ inputs.main-branch }}\` or release events_"
+            else
               echo "$(status_icon "$RESULT_SBOM")"
               echo ""
               echo "| Format | Artifact |"
               echo "|--------|----------|"
               echo "| SPDX JSON | \`sbom-spdx.json\` |"
               echo "| CycloneDX JSON | \`sbom-cyclonedx.json\` |"
-              if [ "$RELEASE_CREATED" = "true" ]; then
+              if [ "${RELEASE_CREATED:-}" = "true" ]; then
                 echo ""
                 echo "> Both files attached to [Release ${RELEASE_TAG}](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG})."
               fi
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+            fi
 
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "---" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          # ────────────────────────────────────────────────────────────────
-          # Summary table
-          # ────────────────────────────────────────────────────────────────
-          {
-            echo "### Summary"
             echo ""
-            echo "| Check | Result |"
-            echo "|-------|--------|"
-            echo "| 🔐 Secret Scanning | $(status_icon "$RESULT_SECRET") |"
-            echo "| 🔍 SonarCloud | $(status_icon "$RESULT_SONAR") |"
-            echo "| ⚖️ License Compliance | $(status_icon "$RESULT_LICENSE") |"
-            echo "| 🏷️ Release Please | $([ "$RELEASE_CREATED" = "true" ] && echo "🚀 Released ${RELEASE_TAG}" || status_icon "$RESULT_RELEASE") |"
-            echo "| 📦 SBOM | $(status_icon "$RESULT_SBOM") |"
-          } >> "$GITHUB_STEP_SUMMARY"
+            echo "---"
+            echo ""
+          ) >> "$GITHUB_STEP_SUMMARY" || echo "_SBOM section failed to render_" >> "$GITHUB_STEP_SUMMARY"
 
-      # ── Fail the step (and the workflow) if any check failed ─────────────
-      - name: Fail if any check failed
-        shell: bash
-        env:
-          RESULT_SECRET:  ${{ needs.secret-scan.result }}
-          RESULT_SONAR:   ${{ needs.sonarcloud.result }}
-          RESULT_LICENSE: ${{ needs.license-check.result }}
-          RESULT_RELEASE: ${{ needs.release-please.result }}
-          RESULT_SBOM:    ${{ needs.sbom.result }}
-        run: |
-          FAILED=false
-          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
-            { [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; } && FAILED=true && break
-          done
-          if [ "$FAILED" = "true" ]; then
-            echo "One or more CI checks failed — see the report above for details."
-            exit 1
-          fi
-          echo "All active CI checks passed."
+          # ────────────────────────────────────────────────────────────────
+          # Footer — generation time
+          # ────────────────────────────────────────────────────────────────
+          (
+            ELAPSED=$(( SECONDS - REPORT_START ))
+            echo "<sub>Report generated in ${ELAPSED}s · [Orion Digital Solutions](https://www.orion360.com/)</sub>"
+          ) >> "$GITHUB_STEP_SUMMARY" || true

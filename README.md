@@ -334,15 +334,33 @@ After every run, a consolidated report is written to the GitHub Actions **Summar
 2. Click the workflow run.
 3. Click **Summary** at the top of the left sidebar.
 
-The report includes:
+The report always renders, even when upstream jobs fail. The CI Report job itself never fails — failures in individual checks are surfaced through the upstream job statuses and the report content.
+
+### Report Structure
+
+The report opens with a **Pipeline Dashboard** — a single at-a-glance table showing status and a one-line detail for every stage, followed by quick-navigation links to each section.
 
 | Section | What it shows |
 |---------|---------------|
-| **Secret Scanning** | Pass/fail, scan type (delta/full), table of findings with file + line (secrets are redacted) |
-| **SonarCloud** | Quality Gate status, overall metrics (bugs, vulnerabilities, code smells, coverage, duplications, LOC, A–E ratings), new code metrics, failed Quality Gate conditions |
-| **License Compliance** | Pass/fail, violation count, packages scanned, table of forbidden licenses found (package, license, source file), collapsible full license inventory |
+| **Pipeline Dashboard** | Overall pass/fail banner, run metadata (trigger, commit, runner, run link), one-row status + detail per stage, quick-navigation links |
+| **Secret Scanning** | Pass/fail, scan type (delta/full), Gitleaks version, findings table with severity/file/line/rule/description/commit link (secrets are redacted), remediation guidance |
+| **SonarCloud** | Quality Gate status, failed gate conditions (expanded when failing), overall metrics table (bugs, vulnerabilities, hotspots, code smells, coverage, duplications, LOC, technical debt as human-readable time, A–E ratings), new code metrics, issue severity breakdown by level, top 15 open issues with severity/type/message/file/line/effort, security hotspots requiring review |
+| **License Compliance** | Pass/fail, packages scanned, forbidden license list in use, violations table with package/version/license/category/severity/source file, full license inventory (collapsed) |
 | **Release Please** | Whether a release was created, version/tag, link to release notes |
 | **SBOM** | Generation status, output formats, link to release assets |
+
+### SonarCloud Detail
+
+The SonarCloud section now makes four API calls to build a comprehensive picture:
+
+| API | What it provides |
+|-----|-----------------|
+| `qualitygates/project_status` | Quality Gate pass/fail + each failed condition with actual value vs threshold |
+| `measures/component` | All code metrics — bugs, vulnerabilities, smells, coverage, duplications, LOC, technical debt |
+| `issues/search` | Top 15 open issues sorted by severity — with message, file, line, effort, and severity facet breakdown |
+| `hotspots/search` | Security hotspots requiring review — probability, category, message, file, line |
+
+All issue and hotspot entries link directly to SonarCloud so developers can click through to the full context.
 
 Artifact files (`gitleaks-report`, `license-report`) are also uploaded to each run for download and audit.
 
