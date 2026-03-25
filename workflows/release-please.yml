@@ -1,0 +1,200 @@
+name: Release Please (Reusable)
+
+# Reusable workflow — automated versioning, changelogs, and GitHub Releases
+# using Release Please (Google).
+#
+# Caller usage:
+#   uses: orion-digital-solutions/.github/workflows/release-please.yml@main
+#   with:
+#     release-type: python
+#   secrets: inherit
+#
+# ── How it works ─────────────────────────────────────────────────────────────
+# Every push to the target branch (default: main) that contains Conventional
+# Commits triggers Release Please to open or update a "Release PR".
+#
+# The Release PR:
+#   • Bumps the version (semver — major/minor/patch based on commit types)
+#   • Generates/updates CHANGELOG.md from commit history
+#   • Stays open and accumulates commits until you are ready to release
+#
+# Merging the Release PR:
+#   • Creates a Git tag (e.g. v1.4.0)
+#   • Creates a GitHub Release with the changelog as release notes
+#   • Triggers the post-release steps below (SBOM, deployment hooks, etc.)
+#
+# ── Conventional Commit → version bump mapping ───────────────────────────────
+#   feat:          minor bump  (1.0.0 → 1.1.0)
+#   fix:           patch bump  (1.0.0 → 1.0.1)
+#   feat!: / BREAKING CHANGE:  major bump  (1.0.0 → 2.0.0)
+#   chore/docs/style/refactor: no bump (changelog entry only)
+#
+# ── Supported release types ──────────────────────────────────────────────────
+# python, node, java, maven, gradle, go, dotnet, rust, helm, simple, ...
+# Full list: https://github.com/googleapis/release-please?tab=readme-ov-file#release-types
+#
+# ── Configuration file (recommended for complex repos) ───────────────────────
+# Place a release-please-config.json in the calling repo root to configure
+# multiple packages, extra files to bump, or custom changelog sections.
+# See: https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      # ── Required ────────────────────────────────────────────────────────────
+      release-type:
+        description: >
+          Release Please release type. Determines which version file is bumped.
+          Common values: python, node, java, maven, dotnet, go, simple.
+          Use 'simple' if your project has no standard manifest file.
+        required: true
+        type: string
+
+      # ── Optional — Branch ────────────────────────────────────────────────────
+      target-branch:
+        description: "Branch to watch for commits and open Release PRs against"
+        required: false
+        type: string
+        default: "main"
+
+      # ── Optional — Versioning ────────────────────────────────────────────────
+      # Override the version file path if Release Please can't detect it.
+      version-file:
+        description: "Path to the version file (e.g. pyproject.toml, package.json)"
+        required: false
+        type: string
+        default: ""
+
+      # ── Optional — Changelog ────────────────────────────────────────────────
+      changelog-path:
+        description: "Path to the changelog file"
+        required: false
+        type: string
+        default: "CHANGELOG.md"
+
+      # Changelog types to include. Omitting feat/fix from this list only hides
+      # them from the changelog — they still trigger version bumps.
+      changelog-types:
+        description: "JSON array of Conventional Commit types to include in CHANGELOG"
+        required: false
+        type: string
+        default: >-
+          [
+            {"type":"feat",     "section":"Features"},
+            {"type":"fix",      "section":"Bug Fixes"},
+            {"type":"perf",     "section":"Performance"},
+            {"type":"refactor", "section":"Refactoring"},
+            {"type":"docs",     "section":"Documentation"},
+            {"type":"chore",    "section":"Chores", "hidden":true},
+            {"type":"ci",       "section":"CI/CD",  "hidden":true}
+          ]
+
+      # ── Optional — Post-release ──────────────────────────────────────────────
+      # Trigger SBOM generation and attachment to the release automatically.
+      generate-sbom-on-release:
+        description: "Run the SBOM workflow when a release is created"
+        required: false
+        type: boolean
+        default: true
+
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+    outputs:
+      # Pass these outputs to downstream jobs in the calling workflow.
+      release-created:
+        description: "true if a new GitHub Release was created by this run"
+        value: ${{ jobs.release-please.outputs.release-created }}
+      tag-name:
+        description: "The Git tag created (e.g. v1.4.0), empty if no release"
+        value: ${{ jobs.release-please.outputs.tag-name }}
+      version:
+        description: "The version string (e.g. 1.4.0), empty if no release"
+        value: ${{ jobs.release-please.outputs.version }}
+      upload-url:
+        description: "GitHub Release upload URL for attaching extra assets"
+        value: ${{ jobs.release-please.outputs.upload-url }}
+
+permissions:
+  contents: write       # create tags and GitHub Releases
+  pull-requests: write  # open and update Release PRs
+
+jobs:
+  # ── Step 1: Create / update the Release PR ──────────────────────────────────
+  release-please:
+    name: Release Please
+    runs-on: ${{ inputs.runner }}
+
+    outputs:
+      release-created: ${{ steps.rp.outputs.release_created }}
+      tag-name:        ${{ steps.rp.outputs.tag_name }}
+      version:         ${{ steps.rp.outputs.version }}
+      upload-url:      ${{ steps.rp.outputs.upload_url }}
+
+    steps:
+      - name: Run Release Please
+        id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          release-type:    ${{ inputs.release-type }}
+          target-branch:   ${{ inputs.target-branch }}
+          changelog-path:  ${{ inputs.changelog-path }}
+          changelog-types: ${{ inputs.changelog-types }}
+          # If the caller has a release-please-config.json, Release Please will
+          # use it automatically — no extra config needed here.
+
+  # ── Step 2: Post-release steps (only runs when a release was just created) ──
+  post-release:
+    name: Post-release tasks
+    needs: release-please
+    if: needs.release-please.outputs.release-created == 'true'
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag-name }}
+          fetch-depth: 0
+
+      # ── Generate and attach SBOM to the release ────────────────────────
+      - name: Generate SBOM — SPDX JSON
+        if: inputs.generate-sbom-on-release
+        uses: anchore/sbom-action@v0
+        with:
+          path:                  "."
+          format:                spdx-json
+          output-file:           sbom.spdx.json
+          upload-artifact:       true
+          artifact-name:         sbom-spdx-${{ needs.release-please.outputs.tag-name }}.json
+          upload-release-assets: true
+
+      - name: Generate SBOM — CycloneDX JSON
+        if: inputs.generate-sbom-on-release
+        uses: anchore/sbom-action@v0
+        with:
+          path:                  "."
+          format:                cyclonedx-json
+          output-file:           sbom.cyclonedx.json
+          upload-artifact:       true
+          artifact-name:         sbom-cyclonedx-${{ needs.release-please.outputs.tag-name }}.json
+          upload-release-assets: true
+
+      # ── Release summary ─────────────────────────────────────────────────
+      - name: Release summary
+        shell: bash
+        run: |
+          echo "### Release ${{ needs.release-please.outputs.tag-name }} created" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tag | \`${{ needs.release-please.outputs.tag-name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Version | \`${{ needs.release-please.outputs.version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.generate-sbom-on-release }}" = "true" ]; then
+            echo "| SBOM (SPDX) | Attached to release |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| SBOM (CycloneDX) | Attached to release |" >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1,0 +1,24 @@
+name: SonarCloud Analysis
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sonarcloud:
+    name: SonarCloud
+    uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
+    with:
+      project-key: orion-digital-solutions_${{ github.event.repository.name }}
+      # ── Uncomment and configure options as needed for this project ──────
+      # project-name: "My Project Display Name"
+      # sources: "src"
+      # exclusions: "**/tests/**,**/node_modules/**"
+      # python-version: "3.11"           # set for Python projects
+      # node-version: "20"               # set for JS/TS projects
+      # java-version: "17"               # set for Java/Kotlin projects
+      # coverage-report-paths: "coverage.xml"
+      # fail-on-quality-gate: true
+    secrets: inherit

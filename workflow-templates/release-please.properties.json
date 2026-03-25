@@ -1,0 +1,6 @@
+{
+  "name": "Release Please",
+  "description": "Automated versioning, CHANGELOG generation, and GitHub Releases from Conventional Commits. Creates a Release PR on every push to main; merging it tags and publishes the release.",
+  "iconName": "octicon tag",
+  "categories": ["Release Management", "CI/CD"]
+}

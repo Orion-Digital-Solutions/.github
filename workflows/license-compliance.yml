@@ -1,0 +1,133 @@
+name: License Compliance (Reusable)
+
+# Reusable workflow — scans dependencies for OSS license compliance using Trivy.
+#
+# Caller usage:
+#   uses: orion-digital-solutions/.github/workflows/license-compliance.yml@main
+#   with:
+#     forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
+#   secrets: inherit
+#
+# ── Why this matters ──────────────────────────────────────────────────────────
+# As a consulting firm delivering software to enterprise clients, GPL/AGPL
+# licenses in transitive dependencies can create contractual and IP obligations.
+# This workflow surfaces those risks before they reach production.
+#
+# ── Results ───────────────────────────────────────────────────────────────────
+# • SARIF report uploaded to the GitHub Security tab (visible under Code Scanning).
+# • Summary table printed in the job log for quick review.
+# • Workflow fails if any dependency carries a forbidden license.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      # Comma-separated SPDX license IDs that must never appear in dependencies.
+      # Copyleft licenses are forbidden by default — adjust per project if needed.
+      forbidden-licenses:
+        description: "Comma-separated SPDX license IDs to treat as violations"
+        required: false
+        type: string
+        default: "GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0,LGPL-2.0,LGPL-2.1,LGPL-3.0,EUPL-1.1,EUPL-1.2,CCDL-1.0,OSL-3.0"
+
+      # Licenses that are always acceptable — skip flagging these even if Trivy
+      # would normally include them in unknown/restricted output.
+      allowed-licenses:
+        description: "Comma-separated SPDX license IDs that are explicitly permitted"
+        required: false
+        type: string
+        default: "MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0,CC0-1.0,Unlicense,Python-2.0,PSF-2.0"
+
+      # Directory to scan. Defaults to repo root.
+      scan-path:
+        description: "Directory to scan for dependency manifests"
+        required: false
+        type: string
+        default: "."
+
+      # Trivy severity filter — licenses classified at or above this level will
+      # be reported. UNKNOWN surfaces unlicensed or unrecognised packages.
+      severity:
+        description: "Minimum severity to report: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+        required: false
+        type: string
+        default: "HIGH,CRITICAL"
+
+      # Upload results to GitHub Security tab as a Code Scanning alert.
+      upload-sarif:
+        description: "Upload SARIF results to GitHub Security tab"
+        required: false
+        type: boolean
+        default: true
+
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF to GitHub Code Scanning
+
+jobs:
+  license-check:
+    name: OSS License Compliance
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Build forbidden/allowed lists for Trivy ──────────────────────────
+      - name: Prepare Trivy license config
+        id: license-config
+        shell: bash
+        env:
+          FORBIDDEN: ${{ inputs.forbidden-licenses }}
+          ALLOWED:   ${{ inputs.allowed-licenses }}
+        run: |
+          # Write a Trivy config file so lists don't have to be passed as
+          # potentially long CLI args (also avoids injection via inputs).
+          cat > trivy-license.yaml << EOF
+          license:
+            forbidden:
+          $(echo "${FORBIDDEN}" | tr ',' '\n' | sed 's/^/    - /')
+            ignored:
+          $(echo "${ALLOWED}"   | tr ',' '\n' | sed 's/^/    - /')
+          EOF
+
+          echo "config_path=trivy-license.yaml" >> "$GITHUB_OUTPUT"
+
+      # ── Scan — table output (job log summary) ────────────────────────────
+      - name: Trivy license scan — summary
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type:    fs
+          scan-ref:     ${{ inputs.scan-path }}
+          scanners:     license
+          severity:     ${{ inputs.severity }}
+          trivy-config: ${{ steps.license-config.outputs.config_path }}
+          format:       table
+          exit-code:    "1"   # fail if forbidden licenses are found
+
+      # ── Scan — SARIF output (GitHub Security tab) ────────────────────────
+      - name: Trivy license scan — SARIF
+        if: inputs.upload-sarif && !cancelled()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type:    fs
+          scan-ref:     ${{ inputs.scan-path }}
+          scanners:     license
+          severity:     ${{ inputs.severity }}
+          trivy-config: ${{ steps.license-config.outputs.config_path }}
+          format:       sarif
+          output:       trivy-license.sarif
+          exit-code:    "0"   # don't fail here — already failed above if needed
+
+      - name: Upload SARIF to GitHub Security tab
+        if: inputs.upload-sarif && !cancelled()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-license.sarif
+          category:   license-compliance

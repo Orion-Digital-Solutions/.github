@@ -1,0 +1,346 @@
+name: Orion CI Orchestrator (Reusable)
+
+# Central CI orchestrator — single source of truth for all quality, security,
+# and release workflows across every Orion Digital Solutions repository.
+#
+# ── Caller usage (add ONE file to each project repo) ─────────────────────────
+#
+#   uses: orion-digital-solutions/.github/workflows/ci.yml@main
+#   with:
+#     sonar-project-key: orion-digital-solutions_my-repo
+#     release-type: python
+#   secrets: inherit
+#
+# ── Execution model ───────────────────────────────────────────────────────────
+#
+#   Phase 1 — parallel scans (always run, fast feedback):
+#     secret-scan  ──┐
+#     sonarcloud   ──┼──► all must pass
+#     license      ──┘
+#
+#   Phase 2 — gated on Phase 1 (push to main/default branch only):
+#     release-please  (opens/merges release PR)
+#     sbom            (generates SBOM artifacts — independent of release-please)
+#
+#   Final — always runs regardless of outcome:
+#     report          (consolidated markdown summary of all job results)
+#
+# ── What runs and when ────────────────────────────────────────────────────────
+#   pull_request     →  Phase 1 only  (fast feedback on changed code)
+#   push (main)      →  Phase 1 + Phase 2
+#   release created  →  SBOM only     (attach to release assets)
+#   schedule         →  Phase 1 only  (weekly full-history scans)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+
+      # ── SonarCloud ──────────────────────────────────────────────────────────
+      sonar-project-key:
+        description: >
+          SonarCloud project key (e.g. orion-digital-solutions_repo-name).
+          Leave blank to skip the SonarCloud scan.
+        required: false
+        type: string
+        default: ""
+
+      sonar-python-coverage-report:
+        description: "Path to Python XML coverage report for SonarCloud (e.g. coverage.xml)"
+        required: false
+        type: string
+        default: ""
+
+      sonar-js-coverage-report:
+        description: "Path to JS/TS LCOV coverage report for SonarCloud (e.g. coverage/lcov.info)"
+        required: false
+        type: string
+        default: ""
+
+      # ── Language / Runtime Setup ─────────────────────────────────────────────
+      python-version:
+        description: "Python version to set up (e.g. '3.11'). Leave blank to skip."
+        required: false
+        type: string
+        default: ""
+
+      node-version:
+        description: "Node.js version to set up (e.g. '20'). Leave blank to skip."
+        required: false
+        type: string
+        default: ""
+
+      java-version:
+        description: "Java version to set up (e.g. '17'). Leave blank to skip."
+        required: false
+        type: string
+        default: ""
+
+      # ── Release ──────────────────────────────────────────────────────────────
+      release-type:
+        description: >
+          Release Please release type (python, node, java, dotnet, go, simple …).
+          Leave blank to skip automated releases.
+        required: false
+        type: string
+        default: ""
+
+      # ── Branch configuration ─────────────────────────────────────────────────
+      main-branch:
+        description: "Name of the default/main branch (Phase 2 only runs on this branch)"
+        required: false
+        type: string
+        default: "main"
+
+      # ── License compliance ───────────────────────────────────────────────────
+      forbidden-licenses:
+        description: "Comma-separated SPDX license IDs to treat as violations (overrides org default)"
+        required: false
+        type: string
+        default: ""
+
+      # ── Secret scanning ──────────────────────────────────────────────────────
+      # Full history scan is forced on schedule events automatically.
+      # Set true here to force it on any trigger (e.g. first-time onboarding).
+      secret-scan-full-history:
+        description: "Force a full git history secret scan regardless of event type"
+        required: false
+        type: boolean
+        default: false
+
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+    outputs:
+      release-created:
+        description: "true if a new GitHub Release was created"
+        value: ${{ jobs.release-please.outputs.release-created }}
+      release-tag:
+        description: "Git tag of the new release (e.g. v1.4.0), empty if none"
+        value: ${{ jobs.release-please.outputs.tag-name }}
+      release-version:
+        description: "Version string of the new release (e.g. 1.4.0), empty if none"
+        value: ${{ jobs.release-please.outputs.version }}
+
+    secrets:
+      SONAR_TOKEN:
+        description: "SonarCloud token (org-level secret)"
+        required: false
+      GITLEAKS_LICENSE:
+        description: "Gitleaks license key (optional)"
+        required: false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 1 — Parallel security & quality scans
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ── 1a. Secret Scanning ────────────────────────────────────────────────────
+  secret-scan:
+    name: Secret Scanning
+    uses: orion-digital-solutions/.github/workflows/secret-scanning.yml@main
+    with:
+      full-scan: >-
+        ${{ inputs.secret-scan-full-history || github.event_name == 'schedule' }}
+      runner: ${{ inputs.runner }}
+    secrets:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  # ── 1b. SonarCloud ────────────────────────────────────────────────────────
+  sonarcloud:
+    name: SonarCloud
+    if: inputs.sonar-project-key != ''
+    uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
+    with:
+      project-key:             ${{ inputs.sonar-project-key }}
+      python-version:          ${{ inputs.python-version }}
+      node-version:            ${{ inputs.node-version }}
+      java-version:            ${{ inputs.java-version }}
+      python-coverage-report:  ${{ inputs.sonar-python-coverage-report }}
+      js-coverage-report:      ${{ inputs.sonar-js-coverage-report }}
+      runner:                  ${{ inputs.runner }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ── 1c. License Compliance ────────────────────────────────────────────────
+  license-check:
+    name: License Compliance
+    # Skip on release events — no new dependencies were introduced
+    if: github.event_name != 'release'
+    uses: orion-digital-solutions/.github/workflows/license-compliance.yml@main
+    with:
+      forbidden-licenses: ${{ inputs.forbidden-licenses }}
+      runner:             ${{ inputs.runner }}
+    secrets: inherit
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE 2 — Gated on Phase 1, push to main branch only
+# ─────────────────────────────────────────────────────────────────────────────
+
+  # ── 2a. Release Please ────────────────────────────────────────────────────
+  release-please:
+    name: Release Please
+    needs: [secret-scan, sonarcloud, license-check]
+    # Run only on push to the main branch when a release type is configured.
+    # Skipped jobs in `needs` are treated as success — so if sonarcloud was
+    # skipped (no project key) this job still runs.
+    if: >-
+      always() &&
+      inputs.release-type != '' &&
+      github.event_name == 'push' &&
+      github.ref_name == inputs.main-branch &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    uses: orion-digital-solutions/.github/workflows/release-please.yml@main
+    with:
+      release-type:              ${{ inputs.release-type }}
+      target-branch:             ${{ inputs.main-branch }}
+      generate-sbom-on-release:  true
+      runner:                    ${{ inputs.runner }}
+    secrets: inherit
+    outputs:
+      release-created: ${{ jobs.release-please.outputs.release-created }}
+      tag-name:        ${{ jobs.release-please.outputs.tag-name }}
+      version:         ${{ jobs.release-please.outputs.version }}
+
+  # ── 2b. SBOM ─────────────────────────────────────────────────────────────
+  sbom:
+    name: SBOM Generation
+    needs: [secret-scan, license-check]
+    # Run on push to main (standalone artifact) or on a release event
+    # (attach to release assets). Independent of release-please.
+    if: >-
+      always() &&
+      (
+        (github.event_name == 'push' && github.ref_name == inputs.main-branch) ||
+        github.event_name == 'release'
+      ) &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    uses: orion-digital-solutions/.github/workflows/sbom.yml@main
+    with:
+      attach-to-release: ${{ github.event_name == 'release' }}
+      runner:            ${{ inputs.runner }}
+    secrets: inherit
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FINAL — Consolidated report (always runs, even on failure)
+# ─────────────────────────────────────────────────────────────────────────────
+
+  report:
+    name: CI Report
+    needs: [secret-scan, sonarcloud, license-check, release-please, sbom]
+    if: always()
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Generate consolidated CI report
+        shell: bash
+        env:
+          # Job results passed through env to avoid expression injection
+          RESULT_SECRET:   ${{ needs.secret-scan.outputs && needs.secret-scan.result || needs.secret-scan.result }}
+          RESULT_SONAR:    ${{ needs.sonarcloud.result }}
+          RESULT_LICENSE:  ${{ needs.license-check.result }}
+          RESULT_RELEASE:  ${{ needs.release-please.result }}
+          RESULT_SBOM:     ${{ needs.sbom.result }}
+          RELEASE_CREATED: ${{ needs.release-please.outputs.release-created }}
+          RELEASE_TAG:     ${{ needs.release-please.outputs.tag-name }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+          EVENT:           ${{ github.event_name }}
+          REF:             ${{ github.ref_name }}
+          SHA:             ${{ github.sha }}
+          RUN_URL:         ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # ── Helper: result → icon ──────────────────────────────────────
+          status_icon() {
+            case "$1" in
+              success)   echo "✅ Pass"    ;;
+              failure)   echo "❌ Fail"    ;;
+              cancelled) echo "🚫 Cancelled" ;;
+              skipped)   echo "⏭️ Skipped" ;;
+              *)         echo "⬜ Unknown"  ;;
+            esac
+          }
+
+          # ── Determine overall result ───────────────────────────────────
+          OVERALL="✅ All checks passed"
+          for result in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              OVERALL="❌ One or more checks failed"
+              break
+            fi
+          done
+
+          # ── Write GitHub Step Summary ──────────────────────────────────
+          {
+            echo "## Orion CI Report — ${OVERALL}"
+            echo ""
+            echo "| | Check | Result |"
+            echo "|---|---|---|"
+            echo "| 🔐 | Secret Scanning (Gitleaks) | $(status_icon "${RESULT_SECRET}") |"
+
+            if [ "${RESULT_SONAR}" = "skipped" ]; then
+              echo "| 🔍 | SonarCloud Code Quality | ⏭️ Skipped (no project key) |"
+            else
+              echo "| 🔍 | SonarCloud Code Quality | $(status_icon "${RESULT_SONAR}") |"
+            fi
+
+            if [ "${RESULT_LICENSE}" = "skipped" ]; then
+              echo "| ⚖️ | License Compliance | ⏭️ Skipped (release event) |"
+            else
+              echo "| ⚖️ | License Compliance | $(status_icon "${RESULT_LICENSE}") |"
+            fi
+
+            if [ "${RESULT_RELEASE}" = "skipped" ]; then
+              echo "| 🏷️ | Release Please | ⏭️ Skipped (not a main branch push, or no release-type set) |"
+            elif [ "${RELEASE_CREATED}" = "true" ]; then
+              echo "| 🏷️ | Release Please | ✅ Release **${RELEASE_TAG}** created |"
+            else
+              echo "| 🏷️ | Release Please | $(status_icon "${RESULT_RELEASE}") (no release this run) |"
+            fi
+
+            if [ "${RESULT_SBOM}" = "skipped" ]; then
+              echo "| 📦 | SBOM Generation | ⏭️ Skipped (only runs on main push / release) |"
+            else
+              echo "| 📦 | SBOM Generation | $(status_icon "${RESULT_SBOM}") |"
+            fi
+
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Trigger:** \`${EVENT}\` on \`${REF}\`"
+            echo "**Commit:** \`${SHA:0:7}\`"
+            echo "**Run:** [View full run](${RUN_URL})"
+
+            if [ "${RELEASE_CREATED}" = "true" ]; then
+              echo ""
+              echo "> 🚀 **New release created:** \`${RELEASE_TAG}\` (v${RELEASE_VERSION})"
+            fi
+
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if any check failed
+        shell: bash
+        env:
+          RESULT_SECRET:  ${{ needs.secret-scan.result }}
+          RESULT_SONAR:   ${{ needs.sonarcloud.result }}
+          RESULT_LICENSE: ${{ needs.license-check.result }}
+          RESULT_RELEASE: ${{ needs.release-please.result }}
+          RESULT_SBOM:    ${{ needs.sbom.result }}
+        run: |
+          FAILED=false
+          for result in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              FAILED=true
+              break
+            fi
+          done
+          if [ "$FAILED" = "true" ]; then
+            echo "One or more CI checks failed. See the report above for details."
+            exit 1
+          fi
+          echo "All CI checks passed."

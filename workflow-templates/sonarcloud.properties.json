@@ -1,0 +1,6 @@
+{
+  "name": "SonarCloud Analysis",
+  "description": "Standardized SonarCloud code quality and security scan via Orion's central reusable workflow. Supports Python, JavaScript/TypeScript, and Java.",
+  "iconName": "octicon shield-check",
+  "categories": ["Security", "Code Quality", "Testing"]
+}

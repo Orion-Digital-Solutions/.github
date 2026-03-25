@@ -1,0 +1,6 @@
+{
+  "name": "SBOM Generation",
+  "description": "Generate a Software Bill of Materials in SPDX and CycloneDX formats using Syft. Uploads as workflow artifacts and attaches to GitHub Releases.",
+  "iconName": "octicon package",
+  "categories": ["Security", "Compliance", "Supply Chain"]
+}

@@ -1,0 +1,174 @@
+name: SonarCloud Analysis (Reusable)
+
+# Reusable workflow — single source of truth for SonarCloud scans
+# across all Orion Digital Solutions repositories.
+#
+# Caller usage:
+#   uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
+#   with:
+#     project-key: orion-digital-solutions_my-repo
+#   secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      # ── Required ──────────────────────────────────────────────────────────
+      project-key:
+        description: "SonarCloud project key (e.g. orion-digital-solutions_repo-name)"
+        required: true
+        type: string
+
+      # ── Optional — Project Metadata ───────────────────────────────────────
+      project-name:
+        description: "Human-readable project name displayed in SonarCloud"
+        required: false
+        type: string
+        default: ""
+
+      sonar-organization:
+        description: "SonarCloud organization slug (defaults to orion-digital-solutions)"
+        required: false
+        type: string
+        default: "orion-digital-solutions"
+
+      # ── Optional — Source Configuration ───────────────────────────────────
+      sources:
+        description: "Comma-separated list of source directories to analyse"
+        required: false
+        type: string
+        default: "."
+
+      exclusions:
+        description: "Glob patterns to exclude from analysis (comma-separated)"
+        required: false
+        type: string
+        default: "**/tests/**,**/test/**,**/__tests__/**,**/node_modules/**,**/vendor/**,**/*.min.js,**/migrations/**"
+
+      # ── Optional — Coverage ───────────────────────────────────────────────
+      coverage-report-paths:
+        description: "Path(s) to coverage XML report(s) (e.g. coverage.xml, reports/coverage.xml)"
+        required: false
+        type: string
+        default: ""
+
+      # ── Optional — Language / Runtime Setup ──────────────────────────────
+      python-version:
+        description: "Python version to set up (leave blank to skip Python setup)"
+        required: false
+        type: string
+        default: ""
+
+      node-version:
+        description: "Node.js version to set up (leave blank to skip Node setup)"
+        required: false
+        type: string
+        default: ""
+
+      java-version:
+        description: "Java version to set up (leave blank to skip Java setup — required for Java/Kotlin/Scala)"
+        required: false
+        type: string
+        default: ""
+
+      # ── Optional — Scan Behaviour ─────────────────────────────────────────
+      fetch-depth:
+        description: "Git fetch depth (0 = full history, required for blame/new-code detection)"
+        required: false
+        type: number
+        default: 0
+
+      fail-on-quality-gate:
+        description: "Fail the workflow if the SonarCloud Quality Gate does not pass"
+        required: false
+        type: boolean
+        default: true
+
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+    secrets:
+      SONAR_TOKEN:
+        description: "SonarCloud authentication token (use the org-level SONAR_TOKEN secret)"
+        required: true
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Scan
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      # ── 2. Optional Runtime Setup ────────────────────────────────────────
+      - name: Set up Python ${{ inputs.python-version }}
+        if: inputs.python-version != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Set up Node.js ${{ inputs.node-version }}
+        if: inputs.node-version != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Set up Java ${{ inputs.java-version }}
+        if: inputs.java-version != ''
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.java-version }}
+          distribution: temurin
+
+      # ── 3. Build Dynamic Sonar Properties ───────────────────────────────
+      # If the repo already has a sonar-project.properties file, Sonar will
+      # merge these extra args with it. If not, these args define the project.
+      - name: Resolve SonarCloud scan properties
+        id: sonar-props
+        shell: bash
+        run: |
+          EXTRA_ARGS=""
+
+          # Project key & org are always injected (can be overridden by
+          # sonar-project.properties in the calling repo).
+          EXTRA_ARGS+="-Dsonar.projectKey=${{ inputs.project-key }} "
+          EXTRA_ARGS+="-Dsonar.organization=${{ inputs.sonar-organization }} "
+
+          if [ -n "${{ inputs.project-name }}" ]; then
+            EXTRA_ARGS+="-Dsonar.projectName='${{ inputs.project-name }}' "
+          fi
+
+          EXTRA_ARGS+="-Dsonar.sources=${{ inputs.sources }} "
+          EXTRA_ARGS+="-Dsonar.exclusions=${{ inputs.exclusions }} "
+
+          if [ -n "${{ inputs.coverage-report-paths }}" ]; then
+            EXTRA_ARGS+="-Dsonar.python.coverage.reportPaths=${{ inputs.coverage-report-paths }} "
+            EXTRA_ARGS+="-Dsonar.javascript.lcov.reportPaths=${{ inputs.coverage-report-paths }} "
+          fi
+
+          echo "extra_args=${EXTRA_ARGS}" >> "$GITHUB_OUTPUT"
+
+      # ── 4. SonarCloud Scan ───────────────────────────────────────────────
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: ${{ steps.sonar-props.outputs.extra_args }}
+
+      # ── 5. Quality Gate Check ────────────────────────────────────────────
+      - name: SonarCloud Quality Gate check
+        if: inputs.fail-on-quality-gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

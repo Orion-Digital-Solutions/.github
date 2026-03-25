@@ -1,0 +1,6 @@
+{
+  "name": "License Compliance",
+  "description": "Scan all dependencies for OSS license risk using Trivy. Flags copyleft licenses (GPL, AGPL, LGPL) and uploads results to GitHub Security tab as Code Scanning alerts.",
+  "iconName": "octicon law",
+  "categories": ["Security", "Compliance"]
+}

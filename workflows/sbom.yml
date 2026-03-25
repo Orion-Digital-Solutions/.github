@@ -1,0 +1,133 @@
+name: SBOM Generation (Reusable)
+
+# Reusable workflow — generates a Software Bill of Materials (SBOM) using Syft.
+#
+# Caller usage:
+#   uses: orion-digital-solutions/.github/workflows/sbom.yml@main
+#   secrets: inherit
+#
+# ── What is an SBOM? ─────────────────────────────────────────────────────────
+# An SBOM is a machine-readable inventory of every library, framework, and
+# component in a software project — including transitive dependencies.
+# Enterprise and government clients increasingly require SBOMs for supply chain
+# security audits and compliance (NIST, EO 14028, ISO 27001).
+#
+# ── Output formats ───────────────────────────────────────────────────────────
+# • SPDX JSON   — industry standard, toolchain-friendly
+# • CycloneDX JSON — used by OWASP tooling and many enterprise scanners
+# Both formats are produced on every run.
+#
+# ── Artifact retention ───────────────────────────────────────────────────────
+# • Every build: SBOMs are uploaded as workflow artifacts (default 30 days).
+# • On GitHub Release: SBOMs are attached as release assets for long-term audit.
+#
+# ── Attestation ──────────────────────────────────────────────────────────────
+# When attest is enabled, a signed SBOM attestation is published to the
+# repository's attestation store (requires id-token: write permission).
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      # Directory or Docker image reference to scan.
+      scan-path:
+        description: "Filesystem path or container image ref to generate the SBOM for"
+        required: false
+        type: string
+        default: "."
+
+      # Artifact name prefix in the workflow run.
+      artifact-name:
+        description: "Prefix for uploaded SBOM artifact names"
+        required: false
+        type: string
+        default: "sbom"
+
+      # How long to retain SBOM artifacts on workflow runs (days).
+      artifact-retention-days:
+        description: "Retention period in days for SBOM artifacts"
+        required: false
+        type: number
+        default: 30
+
+      # Attach SBOMs to the GitHub Release when triggered by a release event.
+      attach-to-release:
+        description: "Attach SBOMs as assets to the GitHub Release (release event only)"
+        required: false
+        type: boolean
+        default: true
+
+      # Generate a signed SBOM attestation using Sigstore/OIDC.
+      # Requires id-token: write in the calling workflow permissions.
+      attest:
+        description: "Publish a signed SBOM attestation to the repo attestation store"
+        required: false
+        type: boolean
+        default: false
+
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions:
+  contents: write        # upload to GitHub Release assets
+  id-token: write        # Sigstore OIDC attestation (only used when attest: true)
+  attestations: write    # store signed attestation
+
+jobs:
+  sbom:
+    name: Generate SBOM
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Generate SPDX JSON SBOM ──────────────────────────────────────────
+      - name: Generate SBOM — SPDX JSON
+        uses: anchore/sbom-action@v0
+        with:
+          path:             ${{ inputs.scan-path }}
+          format:           spdx-json
+          output-file:      ${{ inputs.artifact-name }}.spdx.json
+          upload-artifact:  true
+          artifact-name:    ${{ inputs.artifact-name }}-spdx.json
+          upload-release-assets: ${{ inputs.attach-to-release && github.event_name == 'release' }}
+
+      # ── Generate CycloneDX JSON SBOM ─────────────────────────────────────
+      - name: Generate SBOM — CycloneDX JSON
+        uses: anchore/sbom-action@v0
+        with:
+          path:             ${{ inputs.scan-path }}
+          format:           cyclonedx-json
+          output-file:      ${{ inputs.artifact-name }}.cyclonedx.json
+          upload-artifact:  true
+          artifact-name:    ${{ inputs.artifact-name }}-cyclonedx.json
+          upload-release-assets: ${{ inputs.attach-to-release && github.event_name == 'release' }}
+
+      # ── Optional: signed SBOM attestation (Sigstore) ─────────────────────
+      # Publishes a verifiable attestation linking the SBOM to this exact
+      # build, signed via GitHub's OIDC token (no long-lived keys needed).
+      - name: Attest SBOM (SPDX)
+        if: inputs.attest
+        uses: actions/attest-sbom@v1
+        with:
+          subject-path: ${{ inputs.scan-path }}
+          sbom-path:    ${{ inputs.artifact-name }}.spdx.json
+
+      # ── Print summary ────────────────────────────────────────────────────
+      - name: SBOM summary
+        shell: bash
+        run: |
+          echo "### SBOM Generated" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Format | File |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SPDX JSON | \`${{ inputs.artifact-name }}.spdx.json\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CycloneDX JSON | \`${{ inputs.artifact-name }}.cyclonedx.json\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.attach-to-release }}" = "true" ] && [ "${{ github.event_name }}" = "release" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Both files attached to GitHub Release **${{ github.ref_name }}**." >> "$GITHUB_STEP_SUMMARY"
+          fi

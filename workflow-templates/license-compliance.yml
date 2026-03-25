@@ -1,0 +1,24 @@
+name: License Compliance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly scan to catch license changes introduced by Dependabot
+    - cron: "0 7 * * 1"
+
+jobs:
+  license-check:
+    name: License Compliance
+    uses: orion-digital-solutions/.github/workflows/license-compliance.yml@main
+    with:
+      # Default forbidden list covers copyleft licenses (GPL, AGPL, LGPL).
+      # Override here if this project has specific licence requirements.
+      # forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
+      #
+      # Path to scan (default: repo root).
+      # scan-path: "."
+      pass_on: inherit
+    secrets: inherit

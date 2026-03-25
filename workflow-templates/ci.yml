@@ -1,0 +1,54 @@
+name: Orion CI
+
+# This is the ONLY workflow file you need to add to a project repository.
+# It calls Orion's central CI orchestrator which runs all quality, security,
+# and release pipelines in the correct order with a consolidated report.
+#
+# ── Setup checklist ──────────────────────────────────────────────────────────
+# 1. Set `release-type` to match your project (or remove it to skip releases).
+# 2. Set `sonar-project-key` to your SonarCloud project key (or remove to skip).
+# 3. Set one of python-version / node-version / java-version if needed.
+# 4. If generating coverage, uncomment the relevant coverage-report input.
+# 5. Commit this file — the orchestrator handles everything else.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  release:
+    types: [created]
+  schedule:
+    # Weekly full-history secret + license scan (Monday 06:00 UTC)
+    - cron: "0 6 * * 1"
+
+jobs:
+  ci:
+    name: Orion CI
+    uses: orion-digital-solutions/.github/workflows/ci.yml@main
+    with:
+      # ── Release ─────────────────────────────────────────────────────────
+      # Options: python, node, java, maven, dotnet, go, simple
+      # Remove this line to disable automated releases.
+      release-type: python   # <-- change or remove
+
+      # ── SonarCloud ──────────────────────────────────────────────────────
+      # Format: orion-digital-solutions_<repository-name>
+      # Remove this line to skip SonarCloud.
+      sonar-project-key: orion-digital-solutions_${{ github.event.repository.name }}
+
+      # ── Runtime (uncomment what your project needs) ──────────────────────
+      # python-version: "3.11"
+      # node-version: "20"
+      # java-version: "17"
+
+      # ── Coverage reports (generate in a pre-step before calling this) ────
+      # sonar-python-coverage-report: "coverage.xml"
+      # sonar-js-coverage-report: "coverage/lcov.info"
+
+      # ── Advanced (rarely need changing) ─────────────────────────────────
+      # main-branch: "main"
+      # forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
+      # secret-scan-full-history: false
+    secrets: inherit

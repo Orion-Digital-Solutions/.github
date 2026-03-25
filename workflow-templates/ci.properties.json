@@ -1,0 +1,6 @@
+{
+  "name": "Orion CI",
+  "description": "Full Orion CI pipeline: secret scanning, SonarCloud, license compliance, SBOM generation, and automated releases — all from one file with a consolidated report.",
+  "iconName": "octicon verified",
+  "categories": ["CI/CD", "Security", "Code Quality", "Release Management", "Compliance"]
+}

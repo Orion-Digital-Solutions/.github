@@ -1,0 +1,20 @@
+name: SBOM Generation
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [created]
+
+jobs:
+  sbom:
+    name: SBOM Generation
+    uses: orion-digital-solutions/.github/workflows/sbom.yml@main
+    with:
+      # scan-path: "."                     # default: repo root
+      # artifact-name: "sbom"              # default
+      # artifact-retention-days: 30        # default
+      # attach-to-release: true            # default — attaches to GitHub Release
+      # attest: false                      # set true to publish signed attestation
+      pass_on: inherit
+    secrets: inherit
