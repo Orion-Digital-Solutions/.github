@@ -241,30 +241,52 @@ jobs:
           QG='{}'; MEASURES='{}'; ISSUES='{}'; HOTSPOT_DATA='{}'; QG_STATUS="UNKNOWN"
 
           if [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_TOKEN:-}" ] && [ "${RESULT_SONAR}" != "skipped" ]; then
-            QG=$(curl -sf --max-time 15 \
-              -H "Authorization: Bearer ${SONAR_TOKEN}" \
-              "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}" \
-              2>/dev/null || echo '{}')
+
+            # Retry helper — retries up to 3 times with 5s backoff; returns '{}' on failure
+            sonar_api() {
+              local url="$1" attempt body http_code
+              for attempt in 1 2 3; do
+                body=$(curl -s --max-time 15 -w '\n%{http_code}' \
+                  -H "Authorization: Bearer ${SONAR_TOKEN}" "$url" 2>/dev/null || true)
+                http_code=$(echo "$body" | tail -1)
+                body=$(echo "$body" | sed '$d')
+                if [ "$http_code" = "200" ] && echo "$body" | jq . >/dev/null 2>&1; then
+                  echo "$body"
+                  return 0
+                fi
+                echo "::warning::SonarCloud API attempt $attempt failed (HTTP $http_code) for $url" >&2
+                sleep 5
+              done
+              echo '{}'
+            }
+
+            # Poll /api/ce/component until the analysis task is SUCCESS or FAILED (max ~90s)
+            echo "Polling SonarCloud for analysis processing completion..."
+            for i in $(seq 1 18); do
+              TASK_STATUS=$(curl -sf --max-time 10 \
+                -H "Authorization: Bearer ${SONAR_TOKEN}" \
+                "${SONAR_URL}/api/ce/component?component=${PROJECT_KEY}" \
+                2>/dev/null | jq -r '.current.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+              echo "  attempt $i — task status: ${TASK_STATUS}"
+              if [ "$TASK_STATUS" = "SUCCESS" ] || [ "$TASK_STATUS" = "FAILED" ]; then
+                break
+              fi
+              sleep 5
+            done
+            echo "Proceeding with API data fetch (final task status: ${TASK_STATUS:-UNKNOWN})"
+
+            QG=$(sonar_api "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}")
 
             METRIC_KEYS="bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density"
             METRIC_KEYS="${METRIC_KEYS},security_hotspots,ncloc,sqale_index"
             METRIC_KEYS="${METRIC_KEYS},reliability_rating,security_rating,sqale_rating"
             METRIC_KEYS="${METRIC_KEYS},new_bugs,new_vulnerabilities,new_code_smells"
             METRIC_KEYS="${METRIC_KEYS},new_coverage,new_security_hotspots,new_security_review_rating"
-            MEASURES=$(curl -sf --max-time 15 \
-              -H "Authorization: Bearer ${SONAR_TOKEN}" \
-              "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}" \
-              2>/dev/null || echo '{}')
+            MEASURES=$(sonar_api "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}")
 
-            ISSUES=$(curl -sf --max-time 15 \
-              -H "Authorization: Bearer ${SONAR_TOKEN}" \
-              "${SONAR_URL}/api/issues/search?componentKeys=${PROJECT_KEY}&statuses=OPEN,CONFIRMED,REOPENED&ps=15&s=SEVERITY&asc=false&facets=types,severities" \
-              2>/dev/null || echo '{}')
+            ISSUES=$(sonar_api "${SONAR_URL}/api/issues/search?componentKeys=${PROJECT_KEY}&statuses=OPEN,CONFIRMED,REOPENED&ps=15&s=SEVERITY&asc=false&facets=types,severities")
 
-            HOTSPOT_DATA=$(curl -sf --max-time 15 \
-              -H "Authorization: Bearer ${SONAR_TOKEN}" \
-              "${SONAR_URL}/api/hotspots/search?projectKey=${PROJECT_KEY}&ps=10&status=TO_REVIEW" \
-              2>/dev/null || echo '{}')
+            HOTSPOT_DATA=$(sonar_api "${SONAR_URL}/api/hotspots/search?projectKey=${PROJECT_KEY}&ps=10&status=TO_REVIEW")
 
             QG_STATUS=$(echo "$QG" | jq -r '.projectStatus.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
           fi
@@ -464,6 +486,9 @@ jobs:
           RESULT_SONAR: ${{ needs.sonarcloud.result }}
           PROJECT_KEY:  ${{ inputs.sonar-project-key }}
           SONAR_TOKEN:  ${{ secrets.SONAR_TOKEN }}
+          REPO:         ${{ github.repository }}
+          SERVER_URL:   ${{ github.server_url }}
+          SHA:          ${{ github.sha }}
         run: |
           set -uo pipefail
           SONAR_URL="https://sonarcloud.io"
@@ -588,18 +613,27 @@ jobs:
 
               IC=$(jq '.issues | length' ./sonar-data/issues.json 2>/dev/null || echo 0)
               IT=$(jq '.total // 0'     ./sonar-data/issues.json 2>/dev/null || echo 0)
+              REPO_URL="${SERVER_URL}/${REPO}"
+              if [ "${IC:-0}" -eq 0 ] && [ "$QG_STATUS" != "OK" ]; then
+                echo "> No individual issues were returned from the API. The Quality Gate may have failed due to metric thresholds (e.g. coverage, ratings). Check the [SonarCloud dashboard](${SONAR_URL}/project/issues?id=${PROJECT_KEY}) for details."
+                echo ""
+              fi
               if [ "${IC:-0}" -gt 0 ]; then
                 echo "<details><summary>🔎 Top Issues (showing up to 15 of ${IT})</summary>"
                 echo ""
-                echo "| Severity | Type | Message | File | Line | Effort |"
-                echo "|----------|------|---------|------|------|--------|"
-                jq -r '
+                echo "| Severity | Type | Message | Location | Effort |"
+                echo "|----------|------|---------|----------|--------|"
+                jq -r --arg repo_url "${REPO_URL}" --arg sha "${SHA}" '
                   .issues[]? |
                   (.component | split(":") | last) as $f |
                   (.textRange.startLine // "—" | tostring) as $l |
                   (.effort // "—") as $e |
                   (.message | gsub("[|]";"\\|") | .[0:90]) as $m |
-                  "| \(.severity) | \(.type | gsub("_";" ")) | \($m) | `\($f)` | \($l) | \($e) |"
+                  if $l != "—" then
+                    "| \(.severity) | \(.type | gsub("_";" ")) | \($m) | [`\($f):\($l)`](\($repo_url)/blob/\($sha)/\($f)#L\($l)) | \($e) |"
+                  else
+                    "| \(.severity) | \(.type | gsub("_";" ")) | \($m) | `\($f)` | \($e) |"
+                  end
                 ' ./sonar-data/issues.json 2>/dev/null | head -15
                 echo ""
                 [ "${IT:-0}" -gt 15 ] && echo "_...and $((IT-15)) more. [View all in SonarCloud](${SONAR_URL}/project/issues?id=${PROJECT_KEY})._" && echo ""
@@ -612,14 +646,18 @@ jobs:
               if [ "${HC:-0}" -gt 0 ]; then
                 echo "<details><summary>🔥 Security Hotspots Requiring Review (${HT} total)</summary>"
                 echo ""
-                echo "| Probability | Category | Message | File | Line |"
-                echo "|-------------|----------|---------|------|------|"
-                jq -r '
+                echo "| Probability | Category | Message | Location |"
+                echo "|-------------|----------|---------|----------|"
+                jq -r --arg repo_url "${REPO_URL}" --arg sha "${SHA}" '
                   .hotspots[]? |
                   (.component | split(":") | last) as $f |
                   (.textRange.startLine // "—" | tostring) as $l |
                   (.message | gsub("[|]";"\\|") | .[0:90]) as $m |
-                  "| \(.vulnerabilityProbability) | \(.securityCategory | gsub("-";" ") | ascii_upcase) | \($m) | `\($f)` | \($l) |"
+                  if $l != "—" then
+                    "| \(.vulnerabilityProbability) | \(.securityCategory | gsub("-";" ") | ascii_upcase) | \($m) | [`\($f):\($l)`](\($repo_url)/blob/\($sha)/\($f)#L\($l)) |"
+                  else
+                    "| \(.vulnerabilityProbability) | \(.securityCategory | gsub("-";" ") | ascii_upcase) | \($m) | `\($f)` |"
+                  end
                 ' ./sonar-data/hotspots.json 2>/dev/null | head -10
                 echo ""
                 [ "${HT:-0}" -gt 10 ] && echo "_...and $((HT-10)) more. [Review all hotspots](${SONAR_URL}/project/security_hotspots?id=${PROJECT_KEY})._" && echo ""
