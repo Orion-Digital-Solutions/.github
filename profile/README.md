@@ -1,7 +1,3 @@
-> **Note:** For this README to display as the organization's public GitHub profile page, save it at `profile/README.md` within this `.github` repository.
-
----
-
 # Welcome to Orion Digital Solutions
 
 We are a global IT services, data & analytics, consulting, and outsourcing firm — helping organizations harness the power of digital disruption to fuel growth and gain competitive advantage.
