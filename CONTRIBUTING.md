@@ -1,8 +1,6 @@
 # Contributing to Orion Digital Solutions
 
-Thank you for your interest in contributing to our projects! We welcome contributions across our areas of focus: **Data & Analytics, AI & Machine Learning, Robotic Process Automation, Software Engineering,** and **Automation**.
-
-Please take a moment to review this guide before submitting a contribution.
+Thank you for your interest in contributing to our projects. We welcome contributions across our areas of focus: **Data & Analytics, AI & Machine Learning, Robotic Process Automation, Software Engineering,** and **Automation**.
 
 ---
 
@@ -10,57 +8,27 @@ Please take a moment to review this guide before submitting a contribution.
 
 - [Code of Conduct](#code-of-conduct)
 - [Getting Started](#getting-started)
-- [How to Contribute](#how-to-contribute)
 - [Branch Naming Conventions](#branch-naming-conventions)
 - [Commit Message Guidelines](#commit-message-guidelines)
 - [Pull Request Process](#pull-request-process)
+- [CI Pipeline](#ci-pipeline)
 - [Development Standards](#development-standards)
-- [Reporting Bugs](#reporting-bugs)
-- [Suggesting Features](#suggesting-features)
 
 ---
 
 ## Code of Conduct
 
-By participating in any of our projects, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md). Please read it before contributing.
+By participating in any of our projects, you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ---
 
 ## Getting Started
 
-1. **Fork** the repository you want to contribute to.
-2. **Clone** your fork locally.
-3. **Create a branch** from `main` for your changes (see [Branch Naming Conventions](#branch-naming-conventions)).
-4. **Make your changes** following our [Development Standards](#development-standards).
-5. **Test** your changes thoroughly before submitting.
-6. **Open a Pull Request** against the `main` branch.
-
----
-
-## How to Contribute
-
-### Reporting Bugs
-
-Use the **Bug Report** issue template. Include:
-- A clear, descriptive title
-- Steps to reproduce the issue
-- Expected vs. actual behavior
-- Environment details (OS, language/framework version, etc.)
-- Relevant logs or screenshots
-
-### Suggesting Features or Enhancements
-
-Use the **Feature Request** issue template. Include:
-- The problem you are trying to solve
-- A description of the proposed solution
-- Any alternatives you have considered
-
-### Submitting Code Changes
-
-- Keep PRs focused — one feature or fix per PR
-- Include relevant tests for new functionality
-- Update documentation if your change affects behavior
-- Ensure all CI checks pass before requesting review
+1. **Fork** the repository and clone it locally.
+2. **Create a branch** from `main` following the [naming conventions](#branch-naming-conventions) below.
+3. **Make your changes** following our [development standards](#development-standards).
+4. **Run tests** locally before pushing.
+5. **Open a Pull Request** against `main` — the CI pipeline runs automatically.
 
 ---
 
@@ -78,7 +46,9 @@ Use the **Feature Request** issue template. Include:
 
 ## Commit Message Guidelines
 
-We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification:
+We follow the [Conventional Commits](https://www.conventionalcommits.org/) specification. This is **required**, not optional — `release-please` reads commit messages to determine version bumps and generate changelogs automatically.
+
+### Format
 
 ```
 <type>(<scope>): <short summary>
@@ -88,26 +58,110 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/) speci
 [optional footer]
 ```
 
-**Types:** `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+### Types and their effect
 
-**Examples:**
+| Type | Version bump | In changelog |
+|------|:---:|:---:|
+| `feat` | minor | Yes |
+| `fix` | patch | Yes |
+| `perf` | patch | Yes |
+| `refactor` | — | Yes |
+| `docs` | — | Yes |
+| `test` | — | No |
+| `chore` | — | No |
+| `ci` | — | No |
+| `feat!` or `BREAKING CHANGE:` | **major** | Yes |
+
+### Examples
+
 ```
 feat(ml-pipeline): add SHAP explainability to classification model
 fix(rpa-bot): handle timeout exception in invoice processing workflow
+feat!: redesign public API — removes all v1 endpoints
 docs(api): update endpoint reference for v2 data export
+chore(deps): bump pandas from 2.0.1 to 2.1.0
 ```
+
+> **PR titles** must also follow this format. When squash-merging, the PR title becomes the commit message that `release-please` reads.
 
 ---
 
 ## Pull Request Process
 
-1. Ensure your branch is up to date with `main` before opening a PR.
+1. Ensure your branch is up to date with `main`.
 2. Fill out the pull request template completely.
 3. Assign at least one reviewer from the relevant team.
-4. Address all review comments before merging.
-5. PRs require **at least one approving review** before merge.
-6. Squash commits where appropriate to maintain a clean history.
-7. Delete the source branch after merging.
+4. All [CI checks](#ci-pipeline) must pass before merge.
+5. Address all review comments before merging.
+6. PRs require **at least one approving review**.
+7. Squash and merge — this keeps history clean and ensures commit messages follow the Conventional Commits format.
+8. Delete the source branch after merging.
+
+---
+
+## CI Pipeline
+
+Every repository uses the Orion shared CI pipeline. It runs automatically on every push and pull request. Here is what it does and what you need to know.
+
+### What runs on your PR
+
+| Check | What it does | What causes it to fail |
+|-------|-------------|------------------------|
+| **Secret Scanning** | Scans new commits for leaked API keys, tokens, and credentials (Gitleaks) | Any secret pattern detected in the diff |
+| **SonarCloud** | Analyses new/changed code for bugs, vulnerabilities, code smells, and coverage (new code only) | Quality Gate conditions not met on the new code |
+| **License Compliance** | Scans dependencies for forbidden OSS licenses (GPL, AGPL, LGPL family) | A dependency carries a prohibited license |
+
+### What runs on merge to `main`
+
+All of the above, plus:
+
+| Check | What it does |
+|-------|-------------|
+| **Release Please** | Reads Conventional Commit messages since the last release and opens (or updates) a Release PR with bumped version and changelog. Merging the Release PR creates the GitHub Release and Git tag. |
+| **SBOM Generation** | Generates a Software Bill of Materials in SPDX and CycloneDX formats and uploads as artifacts. |
+
+### Viewing the CI report
+
+After a run completes, click the workflow run in the **Actions** tab, then click **Summary** in the left sidebar. The report shows:
+
+- Secret scan status and any findings (secrets are redacted)
+- SonarCloud Quality Gate status, ratings (A–E), and metrics for both overall and new code
+- License violations table with package names and license identifiers
+- Release and SBOM status
+
+### If CI fails on your PR
+
+| Failing check | Action |
+|--------------|--------|
+| Secret scan | **Rotate the exposed credential immediately**, even if it looks like a test value. Then remove the secret from git history and add an allowlist entry to `.gitleaks.toml` if it is a genuine false positive. |
+| SonarCloud | Fix the new bugs, vulnerabilities, or coverage gaps introduced by your changes. The check only reports on lines you changed — pre-existing issues will not block your PR. |
+| License compliance | Remove or replace the dependency that carries the forbidden license. Open an issue if you believe the license should be permitted for this project. |
+
+### Generating test coverage
+
+Coverage data is optional but strongly recommended. Generate it in a step **before** the CI workflow in your repo's workflow file.
+
+**Python:**
+```bash
+pytest --cov=. --cov-report=xml
+```
+Then pass `sonar-python-coverage-report: "coverage.xml"` to the CI workflow.
+
+**JavaScript / TypeScript:**
+```bash
+jest --coverage
+```
+Then pass `sonar-js-coverage-report: "coverage/lcov.info"` to the CI workflow.
+
+### Skipping CI for documentation-only commits
+
+To skip CI on a commit that only changes documentation and has no code impact, add `[skip ci]` to the commit message:
+
+```
+docs(readme): fix broken link [skip ci]
+```
+
+Use this sparingly — it bypasses all security checks.
 
 ---
 
@@ -115,32 +169,32 @@ docs(api): update endpoint reference for v2 data export
 
 ### General
 
-- Write clean, readable, and self-documenting code
-- Follow the language/framework style guide for the project (PEP 8 for Python, ESLint config for JS/TS, etc.)
-- Do not commit secrets, credentials, API keys, or environment-specific configuration
-- Use `.env` files (gitignored) for local secrets; use GitHub Secrets for CI/CD
+- Write clean, readable, and self-documenting code.
+- Follow the language/framework style guide for the project (PEP 8 for Python, ESLint config for JS/TS).
+- Do not commit secrets, credentials, API keys, or environment-specific configuration.
+- Use `.env` files (gitignored) for local secrets; use GitHub Secrets for CI/CD.
 
-### Data & Analytics / AI / ML Projects
+### Data & Analytics / AI / ML
 
-- Document data sources, transformations, and model assumptions
-- Pin dependency versions (`requirements.txt`, `pyproject.toml`, `package-lock.json`)
-- Include reproducibility instructions (seeds, environment specs)
-- Store large datasets and model artifacts outside the repository (cloud storage, DVC, etc.)
+- Document data sources, transformations, and model assumptions.
+- Pin dependency versions (`requirements.txt`, `pyproject.toml`, `package-lock.json`).
+- Include reproducibility instructions (random seeds, environment specs).
+- Store large datasets and model artifacts outside the repository (cloud storage, DVC, MLflow, etc.).
 
-### RPA / Automation Projects
+### RPA / Automation
 
-- Test automations against sandbox/UAT environments before merging
-- Document process maps and exception-handling logic
-- Avoid hardcoding credentials or environment-specific paths
+- Test automations against sandbox or UAT environments before merging.
+- Document process maps and exception-handling logic alongside the code.
+- Avoid hardcoding credentials or environment-specific paths in bot configurations.
 
 ### Software Engineering
 
-- Write unit tests for all new business logic
-- Maintain test coverage at or above the project's established threshold
-- Follow API versioning conventions for any public-facing endpoints
+- Write unit tests for all new business logic.
+- Maintain test coverage at or above the project's established threshold.
+- Follow API versioning conventions for any public-facing endpoints.
 
 ---
 
 ## Questions?
 
-If you have questions not covered here, open a [Discussion](../../discussions) in the relevant repository or visit [www.orion360.com](https://www.orion360.com/) to contact us.
+Open a [Discussion](../../discussions) in the relevant repository or visit [www.orion360.com](https://www.orion360.com/).

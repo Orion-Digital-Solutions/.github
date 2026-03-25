@@ -2,7 +2,7 @@
 
 We are a global IT services, data & analytics, consulting, and outsourcing firm — helping organizations harness the power of digital disruption to fuel growth and gain competitive advantage.
 
-**Founded in 2010** | Headquartered globally with presence across the USA, Canada, Western Europe, Middle East & Africa, and Asia-Pacific.
+**Founded in 2010** | USA · Canada · Western Europe · Middle East & Africa · Asia-Pacific
 
 ---
 
@@ -48,24 +48,29 @@ Consumer Goods &nbsp;|&nbsp; Retail &nbsp;|&nbsp; Manufacturing &nbsp;|&nbsp; Re
 
 ---
 
-## This Repository
+## Engineering Standards
 
-This `.github` repository is the central hub for our GitHub organization, hosting our public profile and organization-wide defaults. When individual repositories do not define their own community health files, GitHub falls back to the defaults maintained here.
+All Orion engineering teams work from a shared set of standards and automated pipelines maintained in this organization's [`.github` repository](https://github.com/orion-digital-solutions/.github).
 
-### Community Health Files
+### Shared CI/CD Pipeline
 
-- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Standards and expectations for engaging with our community
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — How to contribute to our projects
-- [`SECURITY.md`](SECURITY.md) — Responsible disclosure and security policies
-- [`SUPPORT.md`](SUPPORT.md) — Where to get help
+Every project repository uses a single, centrally maintained CI pipeline that provides:
 
-### Templates
+- **Secret scanning** — Gitleaks detects leaked credentials on every push and PR
+- **Code quality** — SonarCloud analyses bugs, vulnerabilities, coverage, and code smells with Quality Gate enforcement
+- **License compliance** — Trivy flags forbidden OSS licenses (GPL, AGPL, LGPL family) before they reach production
+- **SBOM generation** — Software Bill of Materials (SPDX + CycloneDX) attached to every release
+- **Automated releases** — Release Please manages semantic versioning, changelogs, and GitHub Releases from Conventional Commits
 
-Standardized issue and pull request templates are located in `.github/ISSUE_TEMPLATE/` and `.github/PULL_REQUEST_TEMPLATE.md`.
+Adding CI to a new repository requires [one workflow file](https://github.com/orion-digital-solutions/.github/blob/main/README.md#quick-start--adding-ci-to-a-new-repository). Updates to the shared pipeline apply org-wide automatically.
 
-### Workflows
+### Commit Convention
 
-Reusable CI/CD and security scanning workflows are maintained in `.github/workflows/`.
+We follow [Conventional Commits](https://www.conventionalcommits.org/) across all repositories. Commit types (`feat`, `fix`, `chore`, etc.) drive automated version bumps and changelog generation.
+
+### Community Health
+
+All repositories default to the org-wide [Code of Conduct](https://github.com/orion-digital-solutions/.github/blob/main/CODE_OF_CONDUCT.md), [Contributing Guidelines](https://github.com/orion-digital-solutions/.github/blob/main/CONTRIBUTING.md), [Security Policy](https://github.com/orion-digital-solutions/.github/blob/main/SECURITY.md), and [Support Guide](https://github.com/orion-digital-solutions/.github/blob/main/SUPPORT.md).
 
 ---
 
