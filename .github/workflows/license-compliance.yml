@@ -90,7 +90,7 @@ jobs:
       - name: Trivy license scan — table (fail on violations)
         id: trivy-table
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type:    fs
           scan-ref:     ${{ inputs.scan-path }}
@@ -103,7 +103,7 @@ jobs:
       # ── Scan 2: JSON (artifact for report) ───────────────────────────────
       - name: Trivy license scan — JSON (report artifact)
         if: always()
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type:    fs
           scan-ref:     ${{ inputs.scan-path }}
@@ -158,7 +158,7 @@ jobs:
       # ── Scan 3: SARIF (GitHub Security tab) ──────────────────────────────
       - name: Trivy license scan — SARIF (Security tab)
         if: inputs.upload-sarif && !cancelled()
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type:    fs
           scan-ref:     ${{ inputs.scan-path }}
