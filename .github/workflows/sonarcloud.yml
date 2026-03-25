@@ -118,7 +118,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python-version }}
-          cache: pip
 
       - name: Set up Node.js ${{ inputs.node-version }}
         if: inputs.node-version != ''
@@ -155,9 +154,12 @@ jobs:
           EXTRA_ARGS+="-Dsonar.sources=${{ inputs.sources }} "
           EXTRA_ARGS+="-Dsonar.exclusions=${{ inputs.exclusions }} "
 
-          if [ -n "${{ inputs.coverage-report-paths }}" ]; then
-            EXTRA_ARGS+="-Dsonar.python.coverage.reportPaths=${{ inputs.coverage-report-paths }} "
-            EXTRA_ARGS+="-Dsonar.javascript.lcov.reportPaths=${{ inputs.coverage-report-paths }} "
+          if [ -n "${{ inputs.python-coverage-report }}" ]; then
+            EXTRA_ARGS+="-Dsonar.python.coverage.reportPaths=${{ inputs.python-coverage-report }} "
+          fi
+
+          if [ -n "${{ inputs.js-coverage-report }}" ]; then
+            EXTRA_ARGS+="-Dsonar.javascript.lcov.reportPaths=${{ inputs.js-coverage-report }} "
           fi
 
           echo "extra_args=${EXTRA_ARGS}" >> "$GITHUB_OUTPUT"
