@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Orion Digital Solutions Website
+    url: https://www.orion360.com/
+    about: Visit our website for enterprise support, consulting inquiries, and professional services.
+  - name: Support Guide
+    url: https://github.com/orion-digital-solutions/.github/blob/main/SUPPORT.md
+    about: Read our support guide before opening an issue.

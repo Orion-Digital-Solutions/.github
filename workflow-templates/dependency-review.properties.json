@@ -1,0 +1,6 @@
+{
+  "name": "Dependency Review",
+  "description": "Scan pull requests for vulnerable or high-severity dependency changes.",
+  "iconName": "octicon shield",
+  "categories": ["Security", "Dependencies"]
+}

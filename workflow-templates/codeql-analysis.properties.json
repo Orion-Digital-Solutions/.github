@@ -1,0 +1,6 @@
+{
+  "name": "CodeQL Security Analysis",
+  "description": "Run GitHub CodeQL static analysis to detect security vulnerabilities in source code.",
+  "iconName": "octicon shield-check",
+  "categories": ["Security", "Code Quality"]
+}

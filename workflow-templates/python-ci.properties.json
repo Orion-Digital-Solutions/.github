@@ -1,0 +1,6 @@
+{
+  "name": "Python CI",
+  "description": "Lint and test a Python project with Ruff and pytest across multiple Python versions.",
+  "iconName": "octicon workflow",
+  "categories": ["Python", "Testing", "CI"]
+}
