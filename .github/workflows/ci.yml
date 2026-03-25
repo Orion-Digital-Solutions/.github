@@ -328,10 +328,10 @@ jobs:
             [ "$N" -eq 0 ] && SD="No secrets detected" || SD="${N} secret(s) found — rotate credentials"
           fi
 
-          if   [ "$RESULT_SONAR" = "skipped" ];                        then SND="Skipped — no project key configured"
-          elif [ -z "${PROJECT_KEY:-}" ] || [ -z "${SONAR_TOKEN:-}" ]; then SND="Token or project key unavailable"
-          elif [ "${QG_STATUS:-UNKNOWN}" = "OK" ];                     then SND="Quality Gate passed"
-          else SND="Quality Gate failed"
+          if   [ "$RESULT_SONAR" = "skipped" ]; then SND="Skipped — no project key configured"
+          elif [ "$RESULT_SONAR" = "success" ]; then SND="Quality Gate passed"
+          elif [ "$RESULT_SONAR" = "failure" ]; then SND="Quality Gate failed or scan error"
+          else SND="$(status_icon "$RESULT_SONAR")"
           fi
 
           LC_FILE="./reports/license/license-report.json"
@@ -340,7 +340,11 @@ jobs:
           else
             V=$(jq '.meta.violation_count // 0' "$LC_FILE" 2>/dev/null || echo 0)
             T=$(jq '.meta.total_packages  // 0' "$LC_FILE" 2>/dev/null || echo 0)
-            [ "$V" -eq 0 ] && LD="No violations (${T} packages scanned)" || LD="${V} violation(s) in ${T} packages"
+            R=$(jq '[.results[]?.Licenses[]? | select(.Category=="restricted")] | length' "$LC_FILE" 2>/dev/null || echo 0)
+            if   [ "$V" -gt 0 ]; then LD="${V} forbidden license(s) in ${T} packages"
+            elif [ "$R" -gt 0 ]; then LD="${R} restricted license(s) detected (${T} packages)"
+            else LD="No violations (${T} packages scanned)"
+            fi
           fi
 
           if   [ "$RESULT_RELEASE" = "skipped" ];        then RD="Skipped"
@@ -354,9 +358,11 @@ jobs:
           else SBOMD="$(status_icon "$RESULT_SBOM")"
           fi
 
-          if [ "${QG_STATUS:-UNKNOWN}" = "OK" ]; then SONAR_ST="✅ Passed"
-          elif [ "$RESULT_SONAR" = "skipped" ]; then SONAR_ST="⏭️ Skipped"
-          else SONAR_ST="❌ Failed"
+          if   [ "$RESULT_SONAR" = "skipped" ];   then SONAR_ST="⏭️ Skipped"
+          elif [ "$RESULT_SONAR" = "success" ];  then SONAR_ST="✅ Passed"
+          elif [ "$RESULT_SONAR" = "failure" ];  then SONAR_ST="❌ Failed"
+          elif [ "$RESULT_SONAR" = "cancelled" ]; then SONAR_ST="🚫 Cancelled"
+          else SONAR_ST="⬜ Unknown"
           fi
 
           REL_ST=$([ "${RELEASE_CREATED:-}" = "true" ] && echo "🚀 Released" || status_icon "$RESULT_RELEASE")
@@ -480,15 +486,19 @@ jobs:
           }
           # Overall metric value (ignores new-code period — always returns the total)
           m() {
-            jq -r --arg k "$1" \
-              '.component.measures[]? | select(.metric==$k) | .value // "N/A"' \
-              ./sonar-data/measures.json 2>/dev/null || echo "N/A"
+            local v
+            v=$(jq -r --arg k "$1" \
+              '.component.measures[]? | select(.metric==$k) | .value // ""' \
+              ./sonar-data/measures.json 2>/dev/null || true)
+            [ -n "$v" ] && echo "$v" || echo "N/A"
           }
           # New-code period value (only set when a new-code period exists)
           mn() {
-            jq -r --arg k "$1" \
-              '.component.measures[]? | select(.metric==$k) | .periods[0].value // "N/A"' \
-              ./sonar-data/measures.json 2>/dev/null || echo "N/A"
+            local v
+            v=$(jq -r --arg k "$1" \
+              '.component.measures[]? | select(.metric==$k) | .periods[0].value // ""' \
+              ./sonar-data/measures.json 2>/dev/null || true)
+            [ -n "$v" ] && echo "$v" || echo "N/A"
           }
 
           {
@@ -497,7 +507,9 @@ jobs:
 
             if [ "$RESULT_SONAR" = "skipped" ]; then
               echo "⏭️ _Skipped — no \`sonar-project-key\` configured_"
-            elif [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_TOKEN:-}" ]; then
+            elif [ -z "${PROJECT_KEY:-}" ] || [ -z "${SONAR_TOKEN:-}" ]; then
+              echo "$([ "$RESULT_SONAR" = "success" ] && echo "✅" || echo "⚠️") _SonarCloud credentials not available in report step — check \`SONAR_TOKEN\` secret and \`sonar-project-key\` input_"
+            else
               QG_STATUS="${QG_STATUS:-UNKNOWN}"
               [ "$QG_STATUS" = "OK" ] && QG_ICON="✅ Passed" || QG_ICON="❌ Failed"
 
@@ -614,8 +626,6 @@ jobs:
                 echo "</details>"
                 echo ""
               fi
-            else
-              echo "❌ _(SonarCloud token or project key not available for API query)_"
             fi
 
             echo ""
@@ -652,25 +662,60 @@ jobs:
             elif [ -f "$LC_FILE" ]; then
               TOTAL_PKGS=$(jq '.meta.total_packages // 0'    "$LC_FILE" 2>/dev/null || echo 0)
               VIOLATIONS=$(jq '.meta.violation_count // 0'   "$LC_FILE" 2>/dev/null || echo 0)
-              FORBIDDEN=$(jq -r '(.meta.forbidden_licenses // []) | join(", ")' "$LC_FILE" 2>/dev/null || echo "—")
+              FORBIDDEN_CFG=$(jq -r '(.meta.forbidden_licenses // []) | join(", ")' "$LC_FILE" 2>/dev/null || echo "—")
+              RESTRICTED_COUNT=$(jq '[.results[]?.Licenses[]? | select(.Category=="restricted")] | length' "$LC_FILE" 2>/dev/null || echo 0)
 
-              [ "$VIOLATIONS" -eq 0 ] \
-                && echo "**Status: ✅ No violations detected** (${TOTAL_PKGS} packages scanned)" \
-                || echo "**Status: ❌ ${VIOLATIONS} violation(s) detected** (${TOTAL_PKGS} packages scanned)"
+              # Status derives from the actual job result, not just the violation count.
+              # Trivy can fail due to restricted (non-forbidden) licenses too.
+              if   [ "$RESULT_LICENSE" = "failure" ] && [ "$VIOLATIONS" -gt 0 ]; then
+                echo "**Status: ❌ ${VIOLATIONS} forbidden license violation(s) detected** (${TOTAL_PKGS} packages scanned)"
+              elif [ "$RESULT_LICENSE" = "failure" ] && [ "$RESTRICTED_COUNT" -gt 0 ]; then
+                echo "**Status: ⚠️ Job failed — ${RESTRICTED_COUNT} restricted license(s) detected** (${TOTAL_PKGS} packages scanned)"
+                echo ""
+                echo "> Trivy flagged packages with **restricted** licenses (e.g. LGPL). These are not in the"
+                echo "> forbidden list but may require review depending on your project's usage. Check with legal"
+                echo "> if you distribute software containing LGPL components."
+              elif [ "$RESULT_LICENSE" = "failure" ]; then
+                echo "**Status: ❌ License scan failed** (${TOTAL_PKGS} packages scanned)"
+              elif [ "$VIOLATIONS" -eq 0 ]; then
+                echo "**Status: ✅ No forbidden violations detected** (${TOTAL_PKGS} packages scanned)"
+              else
+                echo "**Status: ❌ ${VIOLATIONS} violation(s) detected** (${TOTAL_PKGS} packages scanned)"
+              fi
               echo ""
-              echo "> Forbidden licenses configured: \`${FORBIDDEN}\`"
-              echo ""
+              [ -n "$FORBIDDEN_CFG" ] && [ "$FORBIDDEN_CFG" != "—" ] \
+                && echo "> Forbidden licenses configured: \`${FORBIDDEN_CFG}\`" \
+                && echo ""
 
               if [ "$VIOLATIONS" -gt 0 ]; then
-                echo "| Package | Version | License | Category | Severity | Source File |"
-                echo "|---------|---------|---------|----------|----------|-------------|"
+                echo "#### Forbidden License Violations"
+                echo ""
+                echo "| Package | Version | License | Severity | Source File |"
+                echo "|---------|---------|---------|----------|-------------|"
                 jq -r '
                   .results[]? | .Target as $t | .Licenses[]? |
                   select(.Category=="forbidden") |
-                  "| `\(.PkgName // "unknown")` | \(.PkgVersion // "—") | \(.Name) | \(.Category) | \(.Severity // "—") | `\($t)` |"
+                  "| `\(.PkgName // "unknown")` | \(.PkgVersion // "—") | \(.Name) | \(.Severity // "—") | `\($t)` |"
                 ' "$LC_FILE" 2>/dev/null | head -25
                 VTOTAL=$(jq '[.results[]?.Licenses[]? | select(.Category=="forbidden")] | length' "$LC_FILE" 2>/dev/null || echo 0)
                 [ "$VTOTAL" -gt 25 ] && echo "" && echo "_...and $((VTOTAL-25)) more. Download the \`license-report\` artifact for the full list._"
+                echo ""
+              fi
+
+              if [ "$RESTRICTED_COUNT" -gt 0 ]; then
+                echo "<details><summary>⚠️ Restricted Licenses Detected (${RESTRICTED_COUNT} — review required)</summary>"
+                echo ""
+                echo "| Package | Version | License | Severity | Source File |"
+                echo "|---------|---------|---------|----------|-------------|"
+                jq -r '
+                  .results[]? | .Target as $t | .Licenses[]? |
+                  select(.Category=="restricted") |
+                  "| `\(.PkgName // "unknown")` | \(.PkgVersion // "—") | \(.Name) | \(.Severity // "—") | `\($t)` |"
+                ' "$LC_FILE" 2>/dev/null | head -25
+                RTOTAL=$(jq '[.results[]?.Licenses[]? | select(.Category=="restricted")] | length' "$LC_FILE" 2>/dev/null || echo 0)
+                [ "$RTOTAL" -gt 25 ] && echo "" && echo "_...and $((RTOTAL-25)) more. Download the \`license-report\` artifact for the full list._"
+                echo ""
+                echo "</details>"
                 echo ""
               fi
 
