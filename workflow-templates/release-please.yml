@@ -7,7 +7,7 @@ on:
 jobs:
   release:
     name: Release Please
-    uses: orion-digital-solutions/.github/workflows/release-please.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       # ── Required — set the correct type for this project ─────────────────
       # Common values: python, node, java, maven, dotnet, go, simple

@@ -3,7 +3,7 @@ name: License Compliance (Reusable)
 # Reusable workflow — scans dependencies for OSS license compliance using Trivy.
 #
 # Caller usage:
-#   uses: orion-digital-solutions/.github/workflows/license-compliance.yml@main
+#   uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
 #   with:
 #     forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
 #   secrets: inherit

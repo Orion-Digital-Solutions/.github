@@ -4,7 +4,7 @@ name: SonarCloud Analysis (Reusable)
 # across all Orion Digital Solutions repositories.
 #
 # Caller usage:
-#   uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
+#   uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
 #   with:
 #     project-key: orion-digital-solutions_my-repo
 #   secrets: inherit

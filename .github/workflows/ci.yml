@@ -5,7 +5,7 @@ name: Orion CI Orchestrator (Reusable)
 #
 # ── Caller usage (add ONE file to each project repo) ─────────────────────────
 #
-#   uses: orion-digital-solutions/.github/workflows/ci.yml@main
+#   uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
 #   with:
 #     sonar-project-key: orion-digital-solutions_my-repo
 #     release-type: python
@@ -129,7 +129,7 @@ jobs:
 
   secret-scan:
     name: Secret Scanning
-    uses: orion-digital-solutions/.github/workflows/secret-scanning.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@main
     with:
       full-scan: ${{ inputs.secret-scan-full-history || github.event_name == 'schedule' }}
       runner:    ${{ inputs.runner }}
@@ -139,7 +139,7 @@ jobs:
   sonarcloud:
     name: SonarCloud
     if: inputs.sonar-project-key != ''
-    uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
     with:
       project-key:            ${{ inputs.sonar-project-key }}
       python-version:         ${{ inputs.python-version }}
@@ -154,7 +154,7 @@ jobs:
   license-check:
     name: License Compliance
     if: github.event_name != 'release'
-    uses: orion-digital-solutions/.github/workflows/license-compliance.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
     with:
       forbidden-licenses: ${{ inputs.forbidden-licenses }}
       runner:             ${{ inputs.runner }}
@@ -174,7 +174,7 @@ jobs:
       github.ref_name == inputs.main-branch &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
-    uses: orion-digital-solutions/.github/workflows/release-please.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       release-type:             ${{ inputs.release-type }}
       target-branch:            ${{ inputs.main-branch }}
@@ -193,7 +193,7 @@ jobs:
       ) &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
-    uses: orion-digital-solutions/.github/workflows/sbom.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
     with:
       attach-to-release: ${{ github.event_name == 'release' }}
       runner:            ${{ inputs.runner }}

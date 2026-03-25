@@ -75,7 +75,7 @@ This is the **only file** you need to add to a project repository to get the ful
 
 ### Step 1 — Create the workflow file
 
-Create `.github/workflows/ci.yml` in your project repository:
+Create `.github/.github/workflows/ci.yml` in your project repository:
 
 ```yaml
 name: Orion CI
@@ -93,7 +93,7 @@ on:
 jobs:
   ci:
     name: Orion CI
-    uses: orion-digital-solutions/.github/workflows/ci.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
     with:
       sonar-project-key: orion-digital-solutions_YOUR-REPO-NAME   # ← change this
       release-type: python                                          # ← change or remove
@@ -184,7 +184,7 @@ Running checks in parallel means total CI time equals the duration of the longes
 ### Orchestrator Input Reference
 
 ```yaml
-uses: orion-digital-solutions/.github/workflows/ci.yml@main
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
 with:
   # ── SonarCloud ─────────────────────────────────────────────────────────
   sonar-project-key: ""              # Required for SonarCloud scan.
@@ -247,7 +247,7 @@ If you need only one pipeline rather than the full suite, call the reusable work
 ```yaml
 jobs:
   secrets:
-    uses: orion-digital-solutions/.github/workflows/secret-scanning.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@main
     with:
       full-scan: false               # true = full history, false = delta (default)
       gitleaks-version: "v8.18.4"   # optional — pin a specific version
@@ -261,7 +261,7 @@ Add a `.gitleaks.toml` file to your repository root to allowlist known false pos
 ```yaml
 jobs:
   sonar:
-    uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
     with:
       project-key: orion-digital-solutions_my-repo   # required
       python-version: "3.11"                          # optional
@@ -275,7 +275,7 @@ jobs:
 ```yaml
 jobs:
   license:
-    uses: orion-digital-solutions/.github/workflows/license-compliance.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
     with:
       forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"   # optional override
     secrets: inherit
@@ -286,7 +286,7 @@ jobs:
 ```yaml
 jobs:
   sbom:
-    uses: orion-digital-solutions/.github/workflows/sbom.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
     with:
       attach-to-release: true   # attach to GitHub Release assets (default)
       attest: false             # sign with Sigstore (optional)
@@ -298,7 +298,7 @@ jobs:
 ```yaml
 jobs:
   release:
-    uses: orion-digital-solutions/.github/workflows/release-please.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       release-type: python    # required
     secrets: inherit
@@ -311,7 +311,7 @@ jobs:
 ```yaml
 jobs:
   release:
-    uses: orion-digital-solutions/.github/workflows/release-please.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       release-type: python
     secrets: inherit
@@ -384,7 +384,7 @@ Coverage is optional but strongly recommended. Generate the report **before** ca
   run: pytest --cov=. --cov-report=xml
 
 - name: Orion CI
-  uses: orion-digital-solutions/.github/workflows/ci.yml@main
+  uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
   with:
     sonar-project-key: orion-digital-solutions_my-repo
     python-version: "3.11"
@@ -398,7 +398,7 @@ Coverage is optional but strongly recommended. Generate the report **before** ca
   run: npm test -- --coverage
 
 - name: Orion CI
-  uses: orion-digital-solutions/.github/workflows/ci.yml@main
+  uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
   with:
     sonar-project-key: orion-digital-solutions_my-repo
     node-version: "20"
@@ -466,7 +466,7 @@ Every input to the orchestrator and individual workflows has a documented defaul
 
 ```yaml
 # Override the forbidden license list for a repo with specific requirements
-uses: orion-digital-solutions/.github/workflows/ci.yml@main
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
 with:
   sonar-project-key: orion-digital-solutions_my-repo
   forbidden-licenses: "GPL-3.0,AGPL-3.0"   # narrower than the org default

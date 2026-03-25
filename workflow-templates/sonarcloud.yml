@@ -9,7 +9,7 @@ on:
 jobs:
   sonarcloud:
     name: SonarCloud
-    uses: orion-digital-solutions/.github/workflows/sonarcloud.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
     with:
       project-key: orion-digital-solutions_${{ github.event.repository.name }}
       # ── Uncomment and configure options as needed for this project ──────

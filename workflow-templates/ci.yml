@@ -26,7 +26,7 @@ on:
 jobs:
   ci:
     name: Orion CI
-    uses: orion-digital-solutions/.github/workflows/ci.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
     with:
       # ── Release ─────────────────────────────────────────────────────────
       # Options: python, node, java, maven, dotnet, go, simple
