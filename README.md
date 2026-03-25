@@ -1,84 +1,42 @@
-> **Note:** For this README to display as the organization's public GitHub profile page, save it at `profile/README.md` within this `.github` repository.
+# Orion Organization Defaults (`.github`)
 
----
+This repository contains organization-wide GitHub defaults for Orion, including community health files, issue/PR templates, and reusable workflow templates.
 
-# Welcome to Orion Digital Solutions
+When a repository in the organization does not define its own community health files, GitHub uses the defaults from this repository.
 
-We are a global IT services, data & analytics, consulting, and outsourcing firm — helping organizations harness the power of digital disruption to fuel growth and gain competitive advantage.
+## Repository Structure
 
-**Founded in 2010** | Headquartered globally with presence across the USA, Canada, Western Europe, Middle East & Africa, and Asia-Pacific.
+```text
+.github/
+├── profile/
+│   └── README.md                          (org profile page — already existed)
+├── ISSUE_TEMPLATE/
+│   ├── bug_report.md                      (structured bug report template)
+│   ├── feature_request.md                 (feature request template with domain tags)
+│   └── config.yml                         (disables blank issues, links to support)
+├── workflow-templates/
+│   ├── python-ci.yml + .properties.json   (lint + test across Python 3.10–3.12)
+│   ├── node-ci.yml + .properties.json     (build + test across Node 18/20/22)
+│   ├── dependency-review.yml + .json      (PR dep vulnerability scanning)
+│   └── codeql-analysis.yml + .json        (weekly static security analysis)
+├── CODE_OF_CONDUCT.md                     (community standards)
+├── CONTRIBUTING.md                        (branch/commit conventions, dev standards per domain)
+├── SECURITY.md                            (vuln reporting, response SLAs, CyberVadis ref)
+├── SUPPORT.md                             (tiered support: community -> enterprise)
+├── PULL_REQUEST_TEMPLATE.md               (structured PR checklist)
+└── README.md                              (repo-level readme)
+```
 
----
+## What Lives Here
 
-## What We Do
+- `profile/README.md`: public organization profile content.
+- `ISSUE_TEMPLATE/`: default issue forms/templates and issue creation behavior.
+- `PULL_REQUEST_TEMPLATE.md`: default pull request checklist and guidance.
+- `workflow-templates/`: reusable workflow templates and metadata for project bootstrap.
+- `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`: default community health and governance docs.
 
-We lead organizations through their digital transformation journey with expertise across:
+## Usage Notes
 
-| Practice | Focus |
-|---|---|
-| **Data & Analytics** | Business Intelligence, Big Data, Predictive Analytics, Computer Vision |
-| **AI & Machine Learning** | Intelligent solutions leveraging advanced AI/ML technologies |
-| **Robotic Process Automation** | Automating high-volume, back-office processes with zero error tolerance |
-| **Technology Consulting** | IT and digital transformation professional services |
-| **PMO Services** | Managing large-scale IT transformation initiatives |
-| **Supply Chain Optimization** | Smart decision-making across complex supply chain ecosystems |
-| **Digital Advisory** | Strategy development and digital roadmap creation |
-
-### Solutions Portfolio
-
-- Enterprise Performance Management
-- AI Agent Solutions
-- Digital Shelf
-- Electronic Invoicing
-- Automated Order Processing
-
----
-
-## Industries We Serve
-
-Consumer Goods &nbsp;|&nbsp; Retail &nbsp;|&nbsp; Manufacturing &nbsp;|&nbsp; Real Estate &nbsp;|&nbsp; Construction &nbsp;|&nbsp; Healthcare &nbsp;|&nbsp; Fintech &nbsp;|&nbsp; Logistics & Distribution
-
----
-
-## Our Partners
-
-| Partner | Certification |
-|---|---|
-| **Oracle** | Global Alliance Partner — Oracle Management Platform (OMP) |
-| **Microsoft** | Gold Certified Data Analytics Solutions Partner |
-| **Blue Prism** | Silver Certified Delivery Partner — MENA Region |
-| **Databricks** | Registered Partner |
-| **CyberVadis** | Platinum Status — Cybersecurity |
-
----
-
-## This Repository
-
-This `.github` repository is the central hub for our GitHub organization, hosting our public profile and organization-wide defaults. When individual repositories do not define their own community health files, GitHub falls back to the defaults maintained here.
-
-### Community Health Files
-
-- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Standards and expectations for engaging with our community
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — How to contribute to our projects
-- [`SECURITY.md`](SECURITY.md) — Responsible disclosure and security policies
-- [`SUPPORT.md`](SUPPORT.md) — Where to get help
-
-### Templates
-
-Standardized issue and pull request templates are located in `.github/ISSUE_TEMPLATE/` and `.github/PULL_REQUEST_TEMPLATE.md`.
-
-### Workflows
-
-Reusable CI/CD and security scanning workflows are maintained in `.github/workflows/`.
-
----
-
-## Connect With Us
-
-- **Website:** [www.orion360.com](https://www.orion360.com/)
-- **LinkedIn:** [Orion Digital Solutions](https://www.linkedin.com/company/orion-digital-solutions)
-- **Contact:** [www.orion360.com](https://www.orion360.com/)
-
----
-
-*Leading the way in digital transformation.*
+- Add or update files here to set organization-wide defaults.
+- Individual repositories can override any default by defining the same file locally.
+- Keep templates and policies aligned with engineering/security standards.
