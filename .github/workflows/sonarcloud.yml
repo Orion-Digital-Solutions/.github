@@ -45,8 +45,14 @@ on:
         default: "**/tests/**,**/test/**,**/__tests__/**,**/node_modules/**,**/vendor/**,**/*.min.js,**/migrations/**"
 
       # ── Optional — Coverage ───────────────────────────────────────────────
-      coverage-report-paths:
-        description: "Path(s) to coverage XML report(s) (e.g. coverage.xml, reports/coverage.xml)"
+      python-coverage-report:
+        description: "Path to Python XML coverage report (e.g. coverage.xml)"
+        required: false
+        type: string
+        default: ""
+
+      js-coverage-report:
+        description: "Path to JS/TS LCOV coverage report (e.g. coverage/lcov.info)"
         required: false
         type: string
         default: ""
