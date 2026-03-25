@@ -478,9 +478,16 @@ jobs:
             [ $r -gt 0 ] && o="${o}${r}min"
             echo "${o%% }" | grep -q . && echo "${o%% }" || echo "< 1min"
           }
+          # Overall metric value (ignores new-code period — always returns the total)
           m() {
             jq -r --arg k "$1" \
-              '.component.measures[]? | select(.metric==$k) | (.periods[0].value // .value) // "N/A"' \
+              '.component.measures[]? | select(.metric==$k) | .value // "N/A"' \
+              ./sonar-data/measures.json 2>/dev/null || echo "N/A"
+          }
+          # New-code period value (only set when a new-code period exists)
+          mn() {
+            jq -r --arg k "$1" \
+              '.component.measures[]? | select(.metric==$k) | .periods[0].value // "N/A"' \
               ./sonar-data/measures.json 2>/dev/null || echo "N/A"
           }
 
@@ -534,8 +541,8 @@ jobs:
               [ "$DEBT" != "N/A" ] && echo "| 💳 Technical Debt | $(fmt_debt "$DEBT") | — |"
               echo ""
 
-              NB=$(m new_bugs); NV=$(m new_vulnerabilities); NS=$(m new_code_smells)
-              NC=$(m new_coverage); NH=$(m new_security_hotspots)
+              NB=$(mn new_bugs); NV=$(mn new_vulnerabilities); NS=$(mn new_code_smells)
+              NC=$(mn new_coverage); NH=$(mn new_security_hotspots)
               HAS_NEW=false
               for v in "$NB" "$NV" "$NS" "$NC" "$NH"; do [ "$v" != "N/A" ] && HAS_NEW=true && break; done
 
