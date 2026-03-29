@@ -1,0 +1,29 @@
+name: Stale Issue & PR Management
+
+on:
+  schedule:
+    # Runs daily at 01:00 UTC — off-peak to minimise rate-limit pressure
+    - cron: "0 1 * * *"
+  workflow_dispatch:  # Allow manual trigger for initial clean-up
+
+jobs:
+  stale:
+    name: Stale Issue & PR Management
+    uses: orion-digital-solutions/.github/.github/workflows/stale.yml@main
+    with:
+      # ── Issues ─────────────────────────────────────────────────────────────
+      # Mark stale after 60 days of inactivity; close 14 days after that.
+      days-before-issue-stale: 60
+      days-before-issue-close: 14
+
+      # ── Pull Requests ───────────────────────────────────────────────────────
+      # PRs move faster — mark stale after 30 days; close 7 days after that.
+      days-before-pr-stale: 30
+      days-before-pr-close: 7
+
+      # ── Exempt labels ───────────────────────────────────────────────────────
+      # Issues or PRs with any of these labels will never be marked stale.
+      # Add more labels as needed (comma-separated, no spaces).
+      exempt-issue-labels: "pinned,security,in-progress,blocked"
+      exempt-pr-labels: "in-progress,blocked,do-not-merge"
+    secrets: inherit

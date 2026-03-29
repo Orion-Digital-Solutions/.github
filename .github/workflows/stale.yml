@@ -1,0 +1,143 @@
+name: Stale Issue & PR Management (Reusable)
+
+# Reusable workflow — auto-labels inactive issues and PRs as stale, then
+# closes them if no activity follows within the grace period.
+#
+# Caller usage:
+#   uses: orion-digital-solutions/.github/.github/workflows/stale.yml@main
+#   secrets: inherit
+#
+# ── Stale lifecycle ───────────────────────────────────────────────────────────
+# 1. After `days-before-issue-stale` / `days-before-pr-stale` days of no
+#    activity the item receives the "stale" label and a warning comment.
+# 2. Any new comment or label change restarts the inactivity clock.
+# 3. After `days-before-issue-close` / `days-before-pr-close` additional days
+#    of continued inactivity the item is closed with a closing comment.
+#
+# ── Exempt labels ─────────────────────────────────────────────────────────────
+# Items carrying any label in `exempt-issue-labels` / `exempt-pr-labels` are
+# never marked stale.  Use "pinned" for issues that should stay open
+# indefinitely, or "in-progress" for active work.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      days-before-issue-stale:
+        description: "Days of issue inactivity before adding the stale label"
+        required: false
+        type: number
+        default: 60
+
+      days-before-pr-stale:
+        description: "Days of PR inactivity before adding the stale label"
+        required: false
+        type: number
+        default: 30
+
+      days-before-issue-close:
+        description: "Days after a stale label is added before closing the issue"
+        required: false
+        type: number
+        default: 14
+
+      days-before-pr-close:
+        description: "Days after a stale label is added before closing the PR"
+        required: false
+        type: number
+        default: 7
+
+      stale-issue-label:
+        description: "Label applied to stale issues"
+        required: false
+        type: string
+        default: "stale"
+
+      stale-pr-label:
+        description: "Label applied to stale PRs"
+        required: false
+        type: string
+        default: "stale"
+
+      exempt-issue-labels:
+        description: "Comma-separated labels that exempt an issue from being marked stale"
+        required: false
+        type: string
+        default: "pinned,security,in-progress,blocked"
+
+      exempt-pr-labels:
+        description: "Comma-separated labels that exempt a PR from being marked stale"
+        required: false
+        type: string
+        default: "in-progress,blocked,do-not-merge"
+
+      operations-per-run:
+        description: "Max GitHub API operations per run (rate-limit guard)"
+        required: false
+        type: number
+        default: 100
+
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    name: Mark and Close Stale Items
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Run stale action
+        uses: actions/stale@v9
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+          # ── Issue settings ────────────────────────────────────────────────
+          days-before-issue-stale: ${{ inputs.days-before-issue-stale }}
+          days-before-issue-close: ${{ inputs.days-before-issue-close }}
+          stale-issue-label: ${{ inputs.stale-issue-label }}
+          exempt-issue-labels: ${{ inputs.exempt-issue-labels }}
+          stale-issue-message: >
+            This issue has been automatically marked as **stale** because it has had
+            no activity for ${{ inputs.days-before-issue-stale }} days.
+            It will be closed in ${{ inputs.days-before-issue-close }} days if no further
+            activity occurs.
+
+            If this issue is still relevant, please:
+            - Add a comment with an update or reproducer
+            - Remove the `stale` label
+
+            Thank you for contributing to Orion Digital Solutions.
+          close-issue-message: >
+            This issue has been **closed automatically** due to inactivity.
+            If the problem persists, please open a new issue with updated context and
+            reference this one.
+
+          # ── PR settings ───────────────────────────────────────────────────
+          days-before-pr-stale: ${{ inputs.days-before-pr-stale }}
+          days-before-pr-close: ${{ inputs.days-before-pr-close }}
+          stale-pr-label: ${{ inputs.stale-pr-label }}
+          exempt-pr-labels: ${{ inputs.exempt-pr-labels }}
+          stale-pr-message: >
+            This pull request has been automatically marked as **stale** because it has
+            had no activity for ${{ inputs.days-before-pr-stale }} days.
+            It will be closed in ${{ inputs.days-before-pr-close }} days if no further
+            activity occurs.
+
+            If this PR is still in progress, please:
+            - Push a new commit or leave a status comment
+            - Add the `in-progress` label to prevent automatic closure
+
+            Thank you for your contribution to Orion Digital Solutions.
+          close-pr-message: >
+            This pull request has been **closed automatically** due to inactivity.
+            Please reopen it or submit a new PR if you would like to continue this work.
+
+          # ── Shared settings ───────────────────────────────────────────────
+          operations-per-run: ${{ inputs.operations-per-run }}

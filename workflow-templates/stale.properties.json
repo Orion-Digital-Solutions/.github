@@ -1,0 +1,6 @@
+{
+  "name": "Stale Issue & PR Management",
+  "description": "Automatically labels issues and PRs as stale after a configurable period of inactivity, then closes them if no activity follows. Keeps the backlog healthy across all org repositories.",
+  "iconName": "octicon archive",
+  "categories": ["Automation"]
+}
