@@ -1,0 +1,76 @@
+name: Label Sync (Reusable)
+
+# Reusable workflow — synchronizes the canonical Orion label set to the
+# calling repository using EndBug/label-sync.
+#
+# Caller usage:
+#   uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@main
+#   secrets: inherit
+#
+# ── What it does ─────────────────────────────────────────────────────────────
+# 1. Checks out orion-digital-solutions/.github to read labels.yml.
+# 2. Runs EndBug/label-sync, which creates or updates labels in the calling
+#    repository to match labels.yml.
+# 3. By default, labels present in the repo but absent from labels.yml are
+#    LEFT INTACT (`delete-other-labels: false`).  Set the input to true if
+#    you want a strict sync that removes unrecognised labels.
+#
+# ── Token requirements ────────────────────────────────────────────────────────
+# The GITHUB_TOKEN of the calling repository requires `issues: write`
+# permission (labels are part of the Issues API).  This is declared in the
+# permissions block below and inherited automatically when `secrets: inherit`
+# is used.
+#
+# ── Org-wide bootstrap ────────────────────────────────────────────────────────
+# To apply the canonical label set to every org repository in one pass, run
+# the following from a machine with the gh CLI authenticated as an org admin:
+#
+#   gh repo list orion-digital-solutions --limit 200 --json nameWithOwner \
+#     --jq '.[].nameWithOwner' \
+#     | xargs -I{} gh workflow run label-sync.yml --repo {} \
+#         -f delete-other-labels=false
+#
+# Or trigger the workflow_dispatch in the workflow-template caller below once
+# it has been added to each project repository.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      delete-other-labels:
+        description: "Remove labels in the repo that are not in labels.yml"
+        required: false
+        type: boolean
+        default: false
+
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    name: Sync Labels
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      # Check out THIS .github repo to get the canonical labels.yml.
+      # The calling project repo's code is NOT needed for this workflow.
+      - name: Checkout orion-digital-solutions/.github (labels source)
+        uses: actions/checkout@v4
+        with:
+          repository: orion-digital-solutions/.github
+          ref: main
+          sparse-checkout: labels.yml
+          sparse-checkout-cone-mode: false
+
+      - name: Sync labels to ${{ github.repository }}
+        uses: EndBug/label-sync@v2
+        with:
+          source: labels.yml
+          delete-other-labels: ${{ inputs.delete-other-labels }}
+          request-token: ${{ secrets.GITHUB_TOKEN }}

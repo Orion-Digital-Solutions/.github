@@ -1,0 +1,109 @@
+# labels.yml — Orion Digital Solutions canonical label set
+#
+# This file is the single source of truth for GitHub labels across all
+# orion-digital-solutions repositories.  It is consumed by the label-sync
+# reusable workflow (.github/workflows/label-sync.yml) and is compatible
+# with the EndBug/label-sync action format.
+#
+# Format:
+#   - name:        label name (case-insensitive in GitHub, kept lowercase here)
+#     color:       hex color WITHOUT the leading '#'
+#     description: short description shown in the GitHub UI (<100 chars)
+#
+# To add a label: append an entry here and open a PR.
+# To rename a label: add the new entry and set 'aliases' to the old name(s);
+#   EndBug/label-sync will rename existing labels rather than delete + recreate.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Bug tracking ──────────────────────────────────────────────────────────────
+
+- name: "bug"
+  color: "d73a4a"
+  description: "Something isn't working"
+
+- name: "duplicate"
+  color: "cfd3d7"
+  description: "This issue or PR already exists"
+
+- name: "invalid"
+  color: "e4e669"
+  description: "This doesn't seem right"
+
+- name: "wontfix"
+  color: "ffffff"
+  description: "This will not be worked on"
+
+# ── Features & improvements ───────────────────────────────────────────────────
+
+- name: "enhancement"
+  color: "a2eeef"
+  description: "New feature or request"
+
+- name: "good first issue"
+  color: "7057ff"
+  description: "Good for newcomers — limited scope, well-defined"
+
+- name: "help wanted"
+  color: "008672"
+  description: "Extra attention or expertise is needed"
+
+- name: "question"
+  color: "d876e3"
+  description: "Further information is requested"
+
+# ── Lifecycle / stale management ──────────────────────────────────────────────
+# These labels are referenced directly by the stale reusable workflow.
+# Renaming them requires updating the exempt-issue-labels / exempt-pr-labels
+# inputs in stale.yml and any caller workflow.
+
+- name: "stale"
+  color: "ededed"
+  description: "No recent activity — will be closed if inactive"
+
+- name: "pinned"
+  color: "0075ca"
+  description: "Should never be auto-closed by the stale workflow"
+
+- name: "in-progress"
+  color: "fbca04"
+  description: "Actively being worked on — exempt from stale automation"
+
+- name: "blocked"
+  color: "e99695"
+  description: "Waiting on an external dependency or decision"
+
+- name: "do-not-merge"
+  color: "b60205"
+  description: "PR must not be merged in its current state"
+
+# ── Release & versioning ──────────────────────────────────────────────────────
+
+- name: "breaking-change"
+  color: "b60205"
+  description: "Contains a breaking change — triggers a major version bump"
+
+- name: "release"
+  color: "0e8a16"
+  description: "Release-related — Release PR, tag, or publish task"
+
+# ── Category ──────────────────────────────────────────────────────────────────
+
+- name: "security"
+  color: "ee0701"
+  description: "Security-related issue, advisory, or fix — exempt from stale"
+
+- name: "dependencies"
+  color: "0075ca"
+  description: "Dependency version update (Dependabot, manual bump)"
+
+- name: "documentation"
+  color: "0052cc"
+  description: "Documentation addition or correction"
+
+- name: "ci-cd"
+  color: "1d76db"
+  description: "CI/CD pipeline, workflow, or automation change"
+
+- name: "governance"
+  color: "5319e7"
+  description: "Governance, process, or policy question — see GOVERNANCE.md"

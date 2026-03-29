@@ -1,0 +1,6 @@
+{
+  "name": "Label Sync",
+  "description": "Synchronizes the canonical Orion label set (labels.yml) to this repository. Runs automatically when the org label definitions change; also triggerable on demand via workflow_dispatch.",
+  "iconName": "octicon tag",
+  "categories": ["Automation"]
+}

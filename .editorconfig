@@ -1,0 +1,116 @@
+# .editorconfig — Orion Digital Solutions
+# https://editorconfig.org
+#
+# Applied automatically by any editor with EditorConfig support
+# (VS Code, JetBrains IDEs, Vim/Neovim, Emacs, Sublime Text, etc.).
+# VS Code: install the "EditorConfig for VS Code" extension (EditorConfig.EditorConfig).
+# JetBrains: built-in, no plugin required.
+#
+# Rules defined here establish a consistent baseline across all Orion
+# repositories.  Individual repos may extend or override by placing their own
+# .editorconfig at their root — EditorConfig merges files from the filesystem
+# root inward, so repo-level rules always take precedence over this file.
+
+root = true
+
+# ── Universal defaults ────────────────────────────────────────────────────────
+[*]
+charset                  = utf-8
+end_of_line              = lf
+indent_style             = space
+indent_size              = 4
+trim_trailing_whitespace = true
+insert_final_newline     = true
+
+# ── YAML ──────────────────────────────────────────────────────────────────────
+# GitHub Actions, Docker Compose, Kubernetes, and most DevOps tooling use
+# 2-space indentation as the community standard for YAML.
+[*.{yml,yaml}]
+indent_size = 2
+
+# ── JSON ──────────────────────────────────────────────────────────────────────
+[*.json]
+indent_size = 2
+
+# ── Web — HTML / CSS / JS / TS ────────────────────────────────────────────────
+[*.{html,htm,css,scss,sass,less}]
+indent_size = 2
+
+[*.{js,jsx,ts,tsx,mjs,cjs}]
+indent_size = 2
+
+# ── Markdown ──────────────────────────────────────────────────────────────────
+# Trailing whitespace is significant in Markdown (two spaces = <br>), so it
+# must not be trimmed globally.  Final newline is still required.
+[*.{md,mdx}]
+trim_trailing_whitespace = false
+
+# ── Python ────────────────────────────────────────────────────────────────────
+# PEP 8: 4 spaces, inherited from [*].  Max line length is enforced by linters
+# (flake8 / ruff), not by EditorConfig.
+[*.py]
+indent_size = 4
+
+# ── Java / Kotlin / Groovy / Scala ────────────────────────────────────────────
+[*.{java,kt,kts,groovy,gradle,scala}]
+indent_size = 4
+
+# ── C# / .NET ─────────────────────────────────────────────────────────────────
+[*.{cs,csx,vb}]
+indent_size = 4
+
+# ── Go ────────────────────────────────────────────────────────────────────────
+# Go uses tabs (enforced by gofmt); width is a display hint only.
+[*.go]
+indent_style = tab
+indent_size  = 4
+
+# ── Rust ──────────────────────────────────────────────────────────────────────
+[*.rs]
+indent_size = 4
+
+# ── Shell ─────────────────────────────────────────────────────────────────────
+[*.{sh,bash,zsh}]
+indent_size = 2
+
+# ── Makefile ──────────────────────────────────────────────────────────────────
+# Make requires hard tabs — do not convert.
+[Makefile]
+indent_style = tab
+
+[*.mk]
+indent_style = tab
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+[Dockerfile*]
+indent_size = 2
+
+# ── TOML ──────────────────────────────────────────────────────────────────────
+# Used by Rust (Cargo.toml), Python (pyproject.toml), gitleaks (.gitleaks.toml)
+[*.toml]
+indent_size = 2
+
+# ── INI / .properties ─────────────────────────────────────────────────────────
+[*.{ini,cfg,conf,properties}]
+indent_size = 4
+
+# ── XML ───────────────────────────────────────────────────────────────────────
+# Used by Maven pom.xml, .NET .csproj, Android manifests, etc.
+[*.{xml,pom,csproj,vbproj,fsproj,targets,props}]
+indent_size = 2
+
+# ── Terraform / HCL ───────────────────────────────────────────────────────────
+[*.{tf,tfvars,hcl}]
+indent_size = 2
+
+# ── Helm / Kubernetes ─────────────────────────────────────────────────────────
+# Helm templates use .yaml but may be in templates/ subdirectories; covered
+# by the *.yml / *.yaml rule above.
+
+# ── Lock files — never reformat ───────────────────────────────────────────────
+# Lock files are machine-generated; reformatting them breaks checksums and
+# causes spurious diffs.
+[{package-lock.json,yarn.lock,pnpm-lock.yaml,Pipfile.lock,poetry.lock,Cargo.lock,composer.lock}]
+indent_size             = unset
+trim_trailing_whitespace = false
+insert_final_newline    = false

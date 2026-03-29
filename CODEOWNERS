@@ -1,0 +1,47 @@
+# CODEOWNERS — Orion Digital Solutions (.github)
+#
+# Defines required reviewers per path pattern. GitHub enforces these
+# assignments automatically when branch protection rules are configured.
+#
+# Syntax: <path-pattern>  <@owner> [<@owner> ...]
+# Patterns are evaluated top-to-bottom; the LAST matching rule wins.
+# Use GitHub team slugs (@org/team) rather than individual usernames
+# wherever possible so that membership changes require no edits here.
+#
+# Teams referenced:
+#   @orion-digital-solutions/devops           — CI/CD pipeline owners
+#   @orion-digital-solutions/engineering-leads — governance & community health
+#   @orion-digital-solutions/security         — security policy & tooling
+#   @orion-digital-solutions/marketing        — public-facing org profile
+
+# ── Default (catch-all) ────────────────────────────────────────────────────
+# Any file not matched by a more specific rule below requires review from
+# engineering leads.
+*                                               @orion-digital-solutions/engineering-leads
+
+# ── Reusable CI/CD workflows ───────────────────────────────────────────────
+# Changes here propagate automatically to every project repository on their
+# next run. Requires DevOps review to prevent regressions org-wide.
+.github/workflows/                              @orion-digital-solutions/devops @orion-digital-solutions/engineering-leads
+
+# ── Workflow starter templates ─────────────────────────────────────────────
+# Templates copied into project repos. Same risk surface as workflows/ above.
+workflow-templates/                             @orion-digital-solutions/devops @orion-digital-solutions/engineering-leads
+
+# ── Security policy ────────────────────────────────────────────────────────
+# Vulnerability disclosure process. Requires security team sign-off.
+SECURITY.md                                     @orion-digital-solutions/security
+
+# ── Community health & governance files ───────────────────────────────────
+# Org-wide defaults served by GitHub to all repositories.
+CODE_OF_CONDUCT.md                              @orion-digital-solutions/engineering-leads
+CONTRIBUTING.md                                 @orion-digital-solutions/engineering-leads
+SUPPORT.md                                      @orion-digital-solutions/engineering-leads
+PULL_REQUEST_TEMPLATE.md                        @orion-digital-solutions/engineering-leads
+
+# ── Issue templates ────────────────────────────────────────────────────────
+ISSUE_TEMPLATE/                                 @orion-digital-solutions/engineering-leads
+
+# ── Public org profile ─────────────────────────────────────────────────────
+# Rendered on the orion-digital-solutions GitHub org landing page.
+profile/                                        @orion-digital-solutions/marketing @orion-digital-solutions/engineering-leads
