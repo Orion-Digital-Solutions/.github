@@ -1,0 +1,26 @@
+name: Label Sync
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Re-sync whenever the canonical label set is updated in the .github repo.
+      # You do not need to maintain a local labels.yml — the reusable workflow
+      # always reads from orion-digital-solutions/.github@main.
+      - ".github/workflows/label-sync.yml"
+  workflow_dispatch:
+    inputs:
+      delete-other-labels:
+        description: "Remove labels not present in the canonical set"
+        type: boolean
+        default: false
+
+jobs:
+  labels:
+    name: Label Sync
+    uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@main
+    with:
+      # Set to true only if you want a strict sync that removes any labels
+      # that are not in the org canonical set.  Defaults to false (additive).
+      delete-other-labels: ${{ inputs.delete-other-labels || false }}
+    secrets: inherit
