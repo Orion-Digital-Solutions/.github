@@ -118,7 +118,9 @@ All of the above, plus:
 | Check | What it does |
 |-------|-------------|
 | **Release Please** | Reads Conventional Commit messages since the last release and opens (or updates) a Release PR with bumped version and changelog. Merging the Release PR creates the GitHub Release and Git tag. |
-| **SBOM Generation** | Generates a Software Bill of Materials in SPDX and CycloneDX formats and uploads as artifacts. |
+| **SBOM Generation** | Generates a Software Bill of Materials in SPDX and CycloneDX formats, uploads workflow artifacts, and can attach files to a GitHub Release when a release is created. SBOM is gated on secret scanning and license compliance passing — it does not wait on SonarCloud. |
+
+SonarCloud is wired with **two org secrets**: `SONAR_TOKEN` runs the scan; `SONAR_ISSUE_RETRIEVAL` powers the detailed Sonar section in the Actions **Summary** (see [README: SonarCloud two tokens](README.md#sonarcloud-two-tokens-scan-vs-report)).
 
 ### Viewing the CI report
 
@@ -126,8 +128,8 @@ After a run completes, click the workflow run in the **Actions** tab, then click
 
 - Secret scan status and any findings (secrets are redacted)
 - SonarCloud Quality Gate status, ratings (A–E), and metrics for both overall and new code
-- License violations table with package names and license identifiers
-- Release and SBOM status
+- License violations table with package names and license identifiers (license scanning also feeds **Security → Code scanning** when SARIF upload is enabled)
+- Release and SBOM status (Sonar Summary detail needs `SONAR_ISSUE_RETRIEVAL`; see org README). Download `gitleaks-report` / `license-report` workflow artifacts for full JSON (**7-day** retention).
 
 ### If CI fails on your PR
 
@@ -139,29 +141,11 @@ After a run completes, click the workflow run in the **Actions** tab, then click
 
 ### Generating test coverage
 
-Coverage data is optional but strongly recommended. Generate it in a step **before** the CI workflow in your repo's workflow file.
-
-**Python:**
-```bash
-pytest --cov=. --cov-report=xml
-```
-Then pass `sonar-python-coverage-report: "coverage.xml"` to the CI workflow.
-
-**JavaScript / TypeScript:**
-```bash
-jest --coverage
-```
-Then pass `sonar-js-coverage-report: "coverage/lcov.info"` to the CI workflow.
+Coverage in SonarCloud is optional. The default one-job caller in the [Quick Start](README.md#quick-start--adding-ci-to-a-new-repository) does not run your tests; the Sonar job uses its own checkout, so `coverage.xml` or `coverage/lcov.info` must exist where the scanner runs (typically after you add test steps or artifact hand-off in a **custom** workflow). Align inputs with your toolchain (`pytest --cov=. --cov-report=xml`, `jest --coverage`, etc.); details are in the central README.
 
 ### Skipping CI for documentation-only commits
 
-To skip CI on a commit that only changes documentation and has no code impact, add `[skip ci]` to the commit message:
-
-```
-docs(readme): fix broken link [skip ci]
-```
-
-Use this sparingly — it bypasses all security checks.
+GitHub Actions does **not** skip workflows based on `[skip ci]` unless each workflow defines that behaviour (for example a job-level `if:` on the commit message). The shared Orion template does **not** implement this by default. Prefer normal CI for doc-only changes unless your repository explicitly adds a skip rule (understand that skipping bypasses security and quality gates).
 
 ---
 
@@ -197,4 +181,4 @@ Use this sparingly — it bypasses all security checks.
 
 ## Questions?
 
-Open a [Discussion](../../discussions) in the relevant repository or visit [www.orion360.com](https://www.orion360.com/).
+Open a **Discussion** on the relevant project repository, or visit [www.orion360.com](https://www.orion360.com/).

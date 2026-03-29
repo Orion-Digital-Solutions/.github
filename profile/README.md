@@ -57,9 +57,9 @@ All Orion engineering teams work from a shared set of standards and automated pi
 Every project repository uses a single, centrally maintained CI pipeline that provides:
 
 - **Secret scanning** — Gitleaks detects leaked credentials on every push and PR
-- **Code quality** — SonarCloud analyses bugs, vulnerabilities, coverage, and code smells with Quality Gate enforcement
+- **Code quality** — SonarCloud analyses bugs, vulnerabilities, coverage, and code smells with Quality Gate enforcement (scan token + separate read-only token for rich CI summaries)
 - **License compliance** — Trivy flags forbidden OSS licenses (GPL, AGPL, LGPL family) before they reach production
-- **SBOM generation** — Software Bill of Materials (SPDX + CycloneDX) attached to every release
+- **SBOM generation** — Software Bill of Materials (SPDX + CycloneDX) as workflow artifacts on default-branch builds and release assets when releases are published
 - **Automated releases** — Release Please manages semantic versioning, changelogs, and GitHub Releases from Conventional Commits
 
 Adding CI to a new repository requires [one workflow file](https://github.com/orion-digital-solutions/.github/blob/main/README.md#quick-start--adding-ci-to-a-new-repository). Updates to the shared pipeline apply org-wide automatically.

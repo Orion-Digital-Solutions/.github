@@ -18,19 +18,27 @@ name: Orion CI Orchestrator (Reusable)
 #     sonarcloud   ──┼──► all must pass
 #     license      ──┘
 #
-#   Phase 2 — gated on Phase 1 (push to main branch only):
-#     release-please  (opens/merges release PR)
-#     sbom            (generates SBOM artifacts — independent of release-please)
+#   Phase 2 — after Phase 1 (exact needs differ per job):
+#     release-please  needs [secret-scan, sonarcloud, license-check]
+#                       only on push to main (+ release-type set); opens/updates Release PR
+#     sbom            needs [secret-scan, license-check] only (not SonarCloud)
+#                       on push to main OR release event; workflow uses if: always() so a
+#                       skipped license job (e.g. release event) does not block this job
+#
+#   Also — inside release-please reusable workflow (when a release is created):
+#     post-release    may attach SPDX + CycloneDX via anchore/sbom-action when
+#                     generate-sbom-on-release is true (orchestrator sets this true)
 #
 #   Final — always runs:
-#     report  (detailed consolidated markdown summary — queries SonarCloud API,
-#              parses Gitleaks JSON and license JSON artifacts)
+#     report  (Actions Summary — SonarCloud Web API via SONAR_ISSUE_RETRIEVAL,
+#              plus Gitleaks + license JSON artifacts)
 #
-# ── What runs and when ────────────────────────────────────────────────────────
-#   pull_request     →  Phase 1 only
-#   push (main)      →  Phase 1 + Phase 2
-#   release created  →  SBOM only
-#   schedule         →  Phase 1 only (full-history secret + license scans)
+# ── What runs and when (caller triggers the orchestrator) ─────────────────────
+#   pull_request     →  Phase 1 + report (release + sbom skipped)
+#   push (main)      →  Phase 1 + release-please (if release-type) + sbom + report
+#   push (other)     →  Phase 1 + report
+#   release created  →  secret-scan + sonar (if key) + sbom attach + report (license skipped)
+#   schedule         →  Phase 1 (full-history secret + license) + report
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -73,7 +81,7 @@ on:
         default: ""
 
       release-type:
-        description: "Release Please release type (python, node, java, dotnet, go, simple). Leave blank to skip."
+        description: "Release Please release type (python, node, java, maven, gradle, dotnet, go, simple, ...). Leave blank to skip."
         required: false
         type: string
         default: ""
@@ -115,10 +123,13 @@ on:
 
     secrets:
       SONAR_TOKEN:
-        description: "SonarCloud token (org-level secret)"
+        description: "SonarCloud token for the SonarCloud scan job (analysis + Quality Gate)"
+        required: false
+      SONAR_ISSUE_RETRIEVAL:
+        description: "SonarCloud token for CI Report only — read-only Web API (Quality Gate, measures, issues, hotspots)"
         required: false
       GITLEAKS_LICENSE:
-        description: "Gitleaks license key (optional)"
+        description: "Gitleaks Pro license key (optional)"
         required: false
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,7 +244,6 @@ jobs:
         shell: bash
         env:
           RESULT_SONAR:           ${{ needs.sonarcloud.result }}
-          SONAR_TOKEN:            ${{ secrets.SONAR_TOKEN }}
           SONAR_ISSUE_RETRIEVAL:  ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
           PROJECT_KEY:            ${{ inputs.sonar-project-key }}
         run: |
@@ -241,7 +251,8 @@ jobs:
           SONAR_URL="https://sonarcloud.io"
           QG='{}'; MEASURES='{}'; ISSUES='{}'; HOTSPOT_DATA='{}'; QG_STATUS="UNKNOWN"
 
-          if [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_TOKEN:-}" ] && [ -n "${SONAR_ISSUE_RETRIEVAL:-}" ] && [ "${RESULT_SONAR}" != "skipped" ]; then
+          # Report APIs use SONAR_ISSUE_RETRIEVAL only — SONAR_TOKEN is for the scan job (see workflow_call secrets).
+          if [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_ISSUE_RETRIEVAL:-}" ] && [ "${RESULT_SONAR}" != "skipped" ]; then
 
             # Retry helper — retries up to 3 times with 5s backoff; returns '{}' on failure
             # Uses SONAR_ISSUE_RETRIEVAL token for read-only data retrieval API calls

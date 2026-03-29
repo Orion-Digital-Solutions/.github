@@ -17,7 +17,8 @@ jobs:
       # target-branch: "main"              # default
       # version-file: "pyproject.toml"     # auto-detected from release-type
       # changelog-path: "CHANGELOG.md"     # default
-      # generate-sbom-on-release: true     # attaches SBOM to every release
+      # generate-sbom-on-release: true     # default in reusable wf — SBOM on release via post-release job
+      #                                      (orchestrator also runs sbom on `release` events — see org README)
     secrets: inherit
 
   # ── Example: use the release outputs in a downstream deploy job ──────────

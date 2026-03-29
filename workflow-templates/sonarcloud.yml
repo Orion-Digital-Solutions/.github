@@ -19,6 +19,7 @@ jobs:
       # python-version: "3.11"           # set for Python projects
       # node-version: "20"               # set for JS/TS projects
       # java-version: "17"               # set for Java/Kotlin projects
-      # coverage-report-paths: "coverage.xml"
-      # fail-on-quality-gate: true
+      # python-coverage-report: "coverage.xml"
+      # js-coverage-report: "coverage/lcov.info"
+      # fail-on-quality-gate: true       # default true in reusable workflow
     secrets: inherit
