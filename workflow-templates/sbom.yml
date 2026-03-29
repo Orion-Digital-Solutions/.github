@@ -16,5 +16,4 @@ jobs:
       # artifact-retention-days: 30        # default
       # attach-to-release: true            # default — attaches to GitHub Release
       # attest: false                      # set true to publish signed attestation
-      pass_on: inherit
     secrets: inherit

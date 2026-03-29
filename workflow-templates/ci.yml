@@ -7,9 +7,10 @@ name: Orion CI
 # ── Setup checklist ──────────────────────────────────────────────────────────
 # 1. Set `release-type` to match your project (or remove it to skip releases).
 # 2. Set `sonar-project-key` to your SonarCloud project key (or remove to skip).
-# 3. Set one of python-version / node-version / java-version if needed.
-# 4. If generating coverage, uncomment the relevant coverage-report input.
-# 5. Commit this file — the orchestrator handles everything else.
+# 3. Org secrets — SonarCloud: two tokens — SONAR_TOKEN (scan); SONAR_ISSUE_RETRIEVAL (CI Report / APIs).
+# 4. Set one of python-version / node-version / java-version if needed.
+# 5. Coverage: this template is one job — see org README for coverage + Sonar caveats.
+# 6. Commit this file — the orchestrator handles everything else.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:

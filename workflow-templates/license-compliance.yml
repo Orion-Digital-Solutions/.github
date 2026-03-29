@@ -20,5 +20,4 @@ jobs:
       #
       # Path to scan (default: repo root).
       # scan-path: "."
-      pass_on: inherit
     secrets: inherit

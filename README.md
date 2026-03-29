@@ -30,7 +30,7 @@ This is the **central engineering standards repository** for the Orion Digital S
 ## Repository Structure
 
 ```
-.github/                                ← root of this repository
+.github/                                ← root of this repository (this repo)
 │
 ├── profile/
 │   └── README.md                       Public-facing organization profile page
@@ -40,13 +40,14 @@ This is the **central engineering standards repository** for the Orion Digital S
 │   ├── feature_request.md              Default feature request template
 │   └── config.yml                      Disables blank issues; links to support
 │
-├── workflows/                          ← Reusable workflows (single source of truth)
-│   ├── ci.yml                          Orchestrator — calls all pipelines in one run
-│   ├── sonarcloud.yml                  SonarCloud code quality & security scan
-│   ├── secret-scanning.yml             Gitleaks secret detection
-│   ├── license-compliance.yml          OSS license compliance (Trivy)
-│   ├── sbom.yml                        SBOM generation (SPDX + CycloneDX)
-│   └── release-please.yml             Automated versioning & GitHub Releases
+├── .github/
+│   └── workflows/                      ← Reusable workflows (single source of truth)
+│       ├── ci.yml                      Orchestrator — calls all pipelines in one run
+│       ├── sonarcloud.yml              SonarCloud code quality & security scan
+│       ├── secret-scanning.yml         Gitleaks secret detection
+│       ├── license-compliance.yml      OSS license compliance (Trivy)
+│       ├── sbom.yml                    SBOM generation (SPDX + CycloneDX)
+│       └── release-please.yml          Automated versioning & GitHub Releases
 │
 ├── workflow-templates/                 ← Starter templates (copied into project repos)
 │   ├── ci.yml + .properties.json       Full Orion CI (calls the orchestrator)
@@ -75,7 +76,7 @@ This is the **only file** you need to add to a project repository to get the ful
 
 ### Step 1 — Create the workflow file
 
-Create `.github/.github/workflows/ci.yml` in your project repository:
+Create `.github/workflows/ci.yml` at the root of your project repository (standard GitHub Actions layout — a single `.github` folder):
 
 ```yaml
 name: Orion CI
@@ -114,6 +115,7 @@ Set `release-type` to match your project. If you do not want automated releases,
 | Java (Gradle) | `gradle` |
 | .NET | `dotnet` |
 | Go | `go` |
+| Rust, Helm, other types | See [googleapis/release-please](https://github.com/googleapis/release-please) (release types documentation) |
 | No manifest / generic | `simple` |
 
 ### Step 3 — Create the SonarCloud project
@@ -132,11 +134,23 @@ These steps are performed **once by an org admin** and automatically apply to al
 
 ### Required org secrets
 
-Navigate to **GitHub → Organization Settings → Secrets and variables → Actions** and create:
+Navigate to **GitHub → Organization Settings → Secrets and variables → Actions** and create the secrets below.
+
+#### SonarCloud: two tokens (scan vs report)
+
+Orion’s pipelines use **two different SonarCloud tokens** on purpose: one drives the scanner, the other only reads data for the markdown **CI Report** in GitHub Actions. That separation keeps analysis credentials distinct from read-only API access for reporting.
+
+| Secret | Used by | Required | Description |
+|--------|---------|----------|-------------|
+| `SONAR_TOKEN` | **SonarCloud scan** job (`sonarcloud.yml`) | Yes (if SonarCloud is enabled) | Token for **running the analysis** and Quality Gate (SonarScanner / `sonarcloud-github-action`). Create at [sonarcloud.io](https://sonarcloud.io) → **My Account** → **Security** → **Generate Token** (type suitable for **analysis** on your projects). |
+| `SONAR_ISSUE_RETRIEVAL` | **CI Report** job (orchestrator `ci.yml` only) | Strongly recommended | Token for **read-only Web API** calls that build the Actions **Summary** (Quality Gate status, measures, top issues, hotspots). Must be able to **browse** project analysis data; it is never used to push a scan. If missing, the scan can still pass but the Summary’s detailed Sonar blocks will be degraded or empty. |
+
+You may use two physically different tokens in SonarCloud (best for least privilege), or the same token value in both secrets **only if** that single token has both analysis and API read permissions—your org policy should prefer two tokens when possible.
+
+#### Other org secrets
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `SONAR_TOKEN` | Yes | SonarCloud authentication token. Generate at [sonarcloud.io](https://sonarcloud.io) → My Account → Security → Generate Token. |
 | `GITLEAKS_LICENSE` | No | Gitleaks Pro license key. Unlocks additional secret detection rules. Leave unset to use the free ruleset. |
 
 ### Workflow permissions
@@ -149,7 +163,7 @@ This is required for `release-please` to open Release PRs and create GitHub Rele
 
 1. Sign in to [sonarcloud.io](https://sonarcloud.io) with your GitHub account.
 2. Import your GitHub organization (`orion-digital-solutions`).
-3. The `SONAR_TOKEN` secret gives all repos in the org access to push analysis results.
+3. Configure **both** org Action secrets above: `SONAR_TOKEN` for scans across repos, and `SONAR_ISSUE_RETRIEVAL` so the orchestrator can render the full Sonar section in each run’s **Summary**.
 
 ---
 
@@ -164,20 +178,23 @@ The orchestrator is the **recommended way** to adopt CI. One file in your repo c
 The orchestrator runs checks in parallel where possible, then gates release automation on their results:
 
 ```
-Every event (push, PR, schedule):
+Phase 1 (parallel whenever configured — sonar skips if no project key; license skips on release):
   ┌─ secret-scan ──────────────────────┐
-  ├─ sonarcloud  ──────────────────────┼──► all pass? → Phase 2
+  ├─ sonarcloud  ──────────────────────┤
   └─ license-check ───────────────────┘
 
-Phase 2 (push to main only, after Phase 1 passes):
-  ├─ release-please   (creates/updates Release PR)
-  └─ sbom             (generates SBOM artifacts)
+Phase 2 — two different dependency chains (push to main, or release for sbom only):
+  ├─ release-please   (creates/updates Release PR; needs all Phase 1 jobs)
+  └─ sbom             (generates SBOM artifacts; needs secret-scan + license-check only)
+
+Release follow-up:
+  └─ When a GitHub Release is created, SBOM can attach to release assets (via orchestrator `release` event and Release Please `generate-sbom-on-release`).
 
 Always (regardless of outcome):
   └─ report           (detailed markdown summary)
 ```
 
-Running checks in parallel means total CI time equals the duration of the longest single check, not the sum of all checks.
+Phase 1 jobs run in parallel where possible, so wall-clock time is driven by the slowest of secret scan, SonarCloud, and license check. **SBOM** does not wait on SonarCloud: it is gated on secret scanning and license compliance only, so it can still run if SonarCloud is skipped (for example when `sonar-project-key` is empty) or after those two succeed.
 
 ---
 
@@ -206,7 +223,9 @@ with:
   java-version: ""                   # e.g. "17"
 
   # ── Release automation ─────────────────────────────────────────────────
-  release-type: ""                   # python | node | maven | gradle | dotnet | go | simple
+  release-type: ""                   # Passed to Release Please — common values:
+                                     # python | node | java | maven | gradle | dotnet | go | simple
+                                     # See Release Please docs for the full list.
                                      # Leave blank to disable automated releases.
 
   # ── Branch configuration ───────────────────────────────────────────────
@@ -220,6 +239,9 @@ with:
   # ── Secret scanning ────────────────────────────────────────────────────
   secret-scan-full-history: false    # Set true to force a full git history scan.
                                      # Useful when first enabling on an existing repo.
+
+  # ── Runner ─────────────────────────────────────────────────────────────
+  runner: "ubuntu-latest"            # GitHub-hosted runner label for all orchestrator jobs.
 ```
 
 ---
@@ -228,13 +250,13 @@ with:
 
 | Event | Secret Scan | SonarCloud | License | Release Please | SBOM |
 |-------|:-----------:|:----------:|:-------:|:--------------:|:----:|
-| `pull_request` | ✅ diff only | ✅ new code | ✅ | — | — |
-| `push` to `main` | ✅ delta | ✅ | ✅ | ✅ (if configured) | ✅ |
-| `push` to other branch | ✅ delta | ✅ vs main | ✅ | — | — |
-| `release` created | — | — | — | — | ✅ attaches to release |
-| `schedule` (weekly) | ✅ full history | — | ✅ | — | — |
+| `pull_request` | ✅ diff only | ✅ (if project key set) | ✅ | — | — |
+| `push` to `main` | ✅ delta | ✅ (if project key set) | ✅ | ✅ (if `release-type` set) | ✅ |
+| `push` to other branch | ✅ delta | ✅ (if project key set) | ✅ | — | — |
+| `release` created | ✅ delta | ✅ (if project key set) | — (skipped) | — | ✅ (attach to release) |
+| `schedule` (weekly) | ✅ full history | ✅ (if project key set) | ✅ | — | — |
 
-**Delta scanning** means only changed code is reported on. SonarCloud surfaces issues only in new/changed lines. Gitleaks scans only the new commits. License compliance runs on the current dependency manifest.
+**Delta scanning** means only changed commits are scanned for secrets on non-schedule events (including `release` triggers, which behave like a push for Gitleaks). SonarCloud still runs a full analysis of the repository on each trigger; Quality Gate and PR decoration focus on **new code** relative to your SonarCloud new-code definition. License compliance runs on the current dependency tree (Trivy) whenever that job is enabled — it is **skipped** on `release` events only. SBOM may run on `release` and attach to the release assets; Release Please may also attach SBOMs when a release is created (see [SBOM on releases (two paths)](#sbom-on-releases-two-paths) below).
 
 ---
 
@@ -258,6 +280,8 @@ Add a `.gitleaks.toml` file to your repository root to allowlist known false pos
 
 #### SonarCloud only
 
+Uses **`SONAR_TOKEN`** only (analysis). It does **not** use `SONAR_ISSUE_RETRIEVAL`; that secret exists for the full orchestrator’s **CI Report** Summary only.
+
 ```yaml
 jobs:
   sonar:
@@ -266,6 +290,7 @@ jobs:
       project-key: orion-digital-solutions_my-repo   # required
       python-version: "3.11"                          # optional
       python-coverage-report: "coverage.xml"          # optional
+      js-coverage-report: "coverage/lcov.info"        # optional (JS/TS)
       fail-on-quality-gate: true                      # default
     secrets: inherit
 ```
@@ -280,6 +305,8 @@ jobs:
       forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"   # optional override
     secrets: inherit
 ```
+
+With default inputs, findings are also sent to the repository **Security → Code scanning** view via SARIF upload (the reusable workflow declares the permissions it needs).
 
 #### SBOM generation only
 
@@ -351,7 +378,7 @@ The report opens with a **Pipeline Dashboard** — a single at-a-glance table sh
 
 ### SonarCloud Detail
 
-The SonarCloud section now makes four API calls to build a comprehensive picture:
+The detailed SonarCloud blocks in the Summary are built with **`SONAR_ISSUE_RETRIEVAL`** (not `SONAR_TOKEN`). The report job issues four Web API calls:
 
 | API | What it provides |
 |-----|-----------------|
@@ -362,7 +389,14 @@ The SonarCloud section now makes four API calls to build a comprehensive picture
 
 All issue and hotspot entries link directly to SonarCloud so developers can click through to the full context.
 
-Artifact files (`gitleaks-report`, `license-report`) are also uploaded to each run for download and audit.
+Artifact files (`gitleaks-report`, `license-report`) are uploaded on each run for download and audit (**7-day** retention in the reusable workflows).
+
+### SBOM on releases (two paths)
+
+1. **Orchestrator `sbom` job** — Runs when your caller workflow triggers on `release` (and on push to `main`). Attaches SPDX + CycloneDX when `attach-to-release` is true.
+2. **Release Please `post-release` job** — When `generate-sbom-on-release` is true (the orchestrator sets this), the reusable `release-please.yml` workflow also runs `sbom-action` and uploads release assets immediately after a release is created.
+
+Using the **full Quick Start** with both **Release** triggers and default inputs can therefore produce SBOMs from both paths around the same release. That is redundant by design for traceability; to rely on a single path, set `generate-sbom-on-release: false` via a custom orchestrator fork or call `release-please.yml` directly with that input disabled.
 
 ---
 
@@ -394,37 +428,16 @@ This makes the Quality Gate focus on regressions introduced since the last relea
 
 ### Passing coverage to SonarCloud
 
-Coverage is optional but strongly recommended. Generate the report **before** calling the CI workflow:
+Coverage in SonarCloud is optional but valuable. The shared **SonarCloud** reusable workflow checks out your repository on its own runner and points the scanner at the paths you pass in (`sonar-python-coverage-report`, `sonar-js-coverage-report`). Those files must **exist on that checkout** when the scanner runs.
 
-**Python (pytest):**
-```yaml
-- name: Run tests with coverage
-  run: pytest --cov=. --cov-report=xml
+The standard [one-job Quick Start](#quick-start--adding-ci-to-a-new-repository) only invokes the orchestrator and does **not** run your test suite, so coverage files are usually absent unless you generate them some other way.
 
-- name: Orion CI
-  uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
-  with:
-    sonar-project-key: orion-digital-solutions_my-repo
-    python-version: "3.11"
-    sonar-python-coverage-report: "coverage.xml"
-  secrets: inherit
-```
+**Practical options:**
 
-**JavaScript / TypeScript (Jest):**
-```yaml
-- name: Run tests with coverage
-  run: npm test -- --coverage
+1. **Add a dedicated workflow or job** in your repository that checks out the code, installs dependencies, runs tests with coverage, and ensures `coverage.xml` or `coverage/lcov.info` is present in the workspace—then either call Sonar with those paths (today this may require **customizing** how you chain jobs and artifacts, or invoking `sonarcloud.yml` from a job that already ran tests) or work with DevOps to extend the shared workflows to download a coverage artifact before scan.
+2. **Start without coverage inputs** and enable them once your repo’s workflow reliably produces reports in the same filesystem as the scanner step.
 
-- name: Orion CI
-  uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
-  with:
-    sonar-project-key: orion-digital-solutions_my-repo
-    node-version: "20"
-    sonar-js-coverage-report: "coverage/lcov.info"
-  secrets: inherit
-```
-
-> Coverage must be generated **in a prior step of the calling job**, not inside the reusable workflow, because the reusable workflow runs on its own runner.
+Repository-specific examples belong in your service repo; keep `sonar-python-coverage-report` / `sonar-js-coverage-report` in sync with where your tests write reports (for example `pytest --cov=. --cov-report=xml` → `coverage.xml`, `jest --coverage` → `coverage/lcov.info`).
 
 ---
 

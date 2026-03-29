@@ -3,6 +3,9 @@ name: SonarCloud Analysis (Reusable)
 # Reusable workflow — single source of truth for SonarCloud scans
 # across all Orion Digital Solutions repositories.
 #
+# Secrets: only SONAR_TOKEN is required here (scanner + Quality Gate).
+# The orchestrator CI Report uses SONAR_ISSUE_RETRIEVAL separately — see ci.yml.
+#
 # Caller usage:
 #   uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
 #   with:
