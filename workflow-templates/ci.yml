@@ -48,6 +48,18 @@ jobs:
       # sonar-python-coverage-report: "coverage.xml"
       # sonar-js-coverage-report: "coverage/lcov.info"
 
+      # ── Docker best-practices pipeline ──────────────────────────────────
+      # Auto-detects any Dockerfile at the repo root — no config required.
+      # Uncomment and adjust the options below only if you need to override
+      # the defaults or point to a non-standard Dockerfile location.
+      #
+      # dockerfile: "Dockerfile"           # explicit path (leave blank to auto-detect)
+      # docker-image-name: "myapp:ci"      # image tag used during CI (never pushed)
+      # docker-trivy-severity: "CRITICAL,HIGH"
+      # docker-dive-enable: true
+      # docker-dive-min-efficiency: 0.9    # fail if layer efficiency < 90%
+      # docker-grype-enable: false         # set true to add Grype as a second CVE scanner
+
       # ── Advanced (rarely need changing) ─────────────────────────────────
       # main-branch: "main"
       # forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"

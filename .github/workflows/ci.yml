@@ -14,12 +14,15 @@ name: Orion CI Orchestrator (Reusable)
 # ── Execution model ───────────────────────────────────────────────────────────
 #
 #   Phase 1 — parallel scans (fast feedback, run on every event):
-#     secret-scan  ──┐
-#     sonarcloud   ──┼──► all must pass
-#     license      ──┘
+#     secret-scan       ──┐
+#     sonarcloud        ──┼──► all must pass
+#     license           ──┘
+#     detect-dockerfile ──► tiny checkout-and-detect job; sets found=true/false (never fails)
+#     docker-lint       ──► needs [detect-dockerfile]; automatically skipped if no Dockerfile
+#                           found — runs Hadolint, Checkov, Trivy, Syft, and Dive in parallel
 #
 #   Phase 2 — after Phase 1 (exact needs differ per job):
-#     release-please  needs [secret-scan, sonarcloud, license-check]
+#     release-please  needs [secret-scan, sonarcloud, license-check, docker-lint]
 #                       only on push to main (+ release-type set); opens/updates Release PR
 #     sbom            needs [secret-scan, license-check] only (not SonarCloud)
 #                       on push to main OR release event; workflow uses if: always() so a
@@ -31,14 +34,14 @@ name: Orion CI Orchestrator (Reusable)
 #
 #   Final — always runs:
 #     report  (Actions Summary — SonarCloud Web API via SONAR_ISSUE_RETRIEVAL,
-#              plus Gitleaks + license JSON artifacts)
+#              plus Gitleaks + license + docker-vuln JSON artifacts)
 #
 # ── What runs and when (caller triggers the orchestrator) ─────────────────────
-#   pull_request     →  Phase 1 + report (release + sbom skipped)
-#   push (main)      →  Phase 1 + release-please (if release-type) + sbom + report
-#   push (other)     →  Phase 1 + report
-#   release created  →  secret-scan + sonar (if key) + sbom attach + report (license skipped)
-#   schedule         →  Phase 1 (full-history secret + license) + report
+#   pull_request     →  Phase 1 + docker-lint (if Dockerfile) + report (release + sbom skipped)
+#   push (main)      →  Phase 1 + docker-lint (if Dockerfile) + release-please + sbom + report
+#   push (other)     →  Phase 1 + docker-lint (if Dockerfile) + report
+#   release created  →  secret-scan + sonar (if key) + docker-lint (if Dockerfile) + sbom + report
+#   schedule         →  Phase 1 + docker-lint (if Dockerfile) + report
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -110,6 +113,46 @@ on:
         type: string
         default: "ubuntu-latest"
 
+      # ── Docker best-practices pipeline ────────────────────────────────────────
+      # The orchestrator auto-detects any Dockerfile at the repo root. Set
+      # dockerfile to an explicit path to override detection, or leave blank
+      # to let the orchestrator find it (checks Dockerfile, then Dockerfile.*).
+      dockerfile:
+        description: "Path to the Dockerfile to scan. Leave blank to auto-detect."
+        required: false
+        type: string
+        default: ""
+
+      docker-image-name:
+        description: "Name and tag for the CI image (e.g. myapp:ci). Defaults to 'orion-docker-check:ci'."
+        required: false
+        type: string
+        default: ""
+
+      docker-trivy-severity:
+        description: "CVE severity levels that fail the Docker vulnerability scan"
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
+
+      docker-dive-enable:
+        description: "Run Dive image efficiency check in the Docker pipeline"
+        required: false
+        type: boolean
+        default: true
+
+      docker-dive-min-efficiency:
+        description: "Minimum Dive image efficiency score (0.0–1.0)"
+        required: false
+        type: number
+        default: 0.9
+
+      docker-grype-enable:
+        description: "Run Grype as a second vulnerability scanner alongside Trivy in the Docker pipeline"
+        required: false
+        type: boolean
+        default: false
+
     outputs:
       release-created:
         description: "true if a new GitHub Release was created"
@@ -171,13 +214,89 @@ jobs:
       runner:             ${{ inputs.runner }}
     secrets: inherit
 
+  # ── Dockerfile detection ───────────────────────────────────────────────────
+  # Runs in parallel with Phase 1 scans. Checks the caller's repo for a
+  # Dockerfile (or Dockerfile.*) and outputs the path found. This job never
+  # fails so a missing Dockerfile never blocks other Phase 1 jobs.
+  detect-dockerfile:
+    name: Detect Dockerfile
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      found: ${{ steps.check.outputs.found }}
+      path:  ${{ steps.check.outputs.path }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate Dockerfile
+        id: check
+        shell: bash
+        env:
+          EXPLICIT_PATH: ${{ inputs.dockerfile }}
+        run: |
+          # If the caller provided an explicit path, honour it
+          if [ -n "${EXPLICIT_PATH}" ]; then
+            if [ -f "${EXPLICIT_PATH}" ]; then
+              echo "found=true"            >> "$GITHUB_OUTPUT"
+              echo "path=${EXPLICIT_PATH}" >> "$GITHUB_OUTPUT"
+              echo "Dockerfile found at explicit path: ${EXPLICIT_PATH}"
+            else
+              echo "::warning::Dockerfile not found at specified path '${EXPLICIT_PATH}'. Docker pipeline will be skipped."
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              echo "path="       >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          # Auto-detect: prefer bare Dockerfile, then Dockerfile.* (max depth 2)
+          FOUND_PATH=""
+          if [ -f "Dockerfile" ]; then
+            FOUND_PATH="Dockerfile"
+          else
+            FOUND_PATH=$(find . -maxdepth 2 -name "Dockerfile.*" ! -name "*.md" ! -name "*.txt" \
+              | sort | head -1 | sed 's|^\./||')
+          fi
+
+          if [ -n "${FOUND_PATH}" ]; then
+            echo "found=true"          >> "$GITHUB_OUTPUT"
+            echo "path=${FOUND_PATH}"  >> "$GITHUB_OUTPUT"
+            echo "Dockerfile detected: ${FOUND_PATH}"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "path="       >> "$GITHUB_OUTPUT"
+            echo "No Dockerfile found — Docker pipeline will be skipped."
+          fi
+
+  # ── Docker best-practices pipeline ────────────────────────────────────────
+  # Automatically skipped when detect-dockerfile reports no Dockerfile.
+  # Runs Hadolint + Checkov (lint), Trivy + optional Grype (CVEs),
+  # Syft (container SBOM), and Dive (efficiency) in parallel sub-jobs.
+  docker-lint:
+    name: Docker Best Practices
+    needs: [detect-dockerfile]
+    if: >-
+      always() &&
+      needs.detect-dockerfile.result == 'success' &&
+      needs.detect-dockerfile.outputs.found == 'true'
+    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+    with:
+      dockerfile:          ${{ needs.detect-dockerfile.outputs.path }}
+      image-name:          ${{ inputs.docker-image-name || 'orion-docker-check:ci' }}
+      trivy-severity:      ${{ inputs.docker-trivy-severity }}
+      dive-enable:         ${{ inputs.docker-dive-enable }}
+      dive-min-efficiency: ${{ inputs.docker-dive-min-efficiency }}
+      grype-enable:        ${{ inputs.docker-grype-enable }}
+      sbom-attach-to-release: ${{ github.event_name == 'release' }}
+      runner:              ${{ inputs.runner }}
+    secrets: inherit
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 2 — Gated on Phase 1, push to main branch only
 # ─────────────────────────────────────────────────────────────────────────────
 
   release-please:
     name: Release Please
-    needs: [secret-scan, sonarcloud, license-check]
+    needs: [secret-scan, sonarcloud, license-check, docker-lint]
     if: >-
       always() &&
       inputs.release-type != '' &&
@@ -216,7 +335,7 @@ jobs:
 
   report:
     name: CI Report
-    needs: [secret-scan, sonarcloud, license-check, release-please, sbom]
+    needs: [secret-scan, sonarcloud, license-check, release-please, sbom, detect-dockerfile, docker-lint]
     if: always()
     runs-on: ${{ inputs.runner }}
 
@@ -235,6 +354,13 @@ jobs:
           name: license-report
           path: ./reports/license
         continue-on-error: true
+
+      - name: Download Docker vulnerability report
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-vuln-report
+          path: ./reports/docker
+        continue-on-error: true   # only exists when docker-lint ran and completed
 
       # ── Step 1: Fetch SonarCloud data + write shared env ────────────────
       # Expressions in this step are minimal so it stays well under 21k chars.
@@ -322,6 +448,7 @@ jobs:
           RESULT_LICENSE:  ${{ needs.license-check.result }}
           RESULT_RELEASE:  ${{ needs.release-please.result }}
           RESULT_SBOM:     ${{ needs.sbom.result }}
+          RESULT_DOCKER:   ${{ needs.docker-lint.result }}
           RELEASE_CREATED: ${{ needs.release-please.outputs.release-created }}
           RELEASE_TAG:     ${{ needs.release-please.outputs.tag-name }}
           EVENT:           ${{ github.event_name }}
@@ -347,7 +474,7 @@ jobs:
           }
 
           OVERALL_PASS=true
-          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM"; do
+          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM" "$RESULT_DOCKER"; do
             { [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; } && OVERALL_PASS=false && break
           done
           [ "$OVERALL_PASS" = "true" ] \
@@ -393,6 +520,19 @@ jobs:
           else SBOMD="$(status_icon "$RESULT_SBOM")"
           fi
 
+          DK_FILE="./reports/docker/docker-vuln-report.json"
+          if   [ "$RESULT_DOCKER" = "skipped" ]; then DD="Skipped — no Dockerfile detected"
+          elif [ ! -f "$DK_FILE" ];              then DD="$(status_icon "$RESULT_DOCKER")"
+          else
+            VULN_COUNT=$(jq '.meta.vulnerability_count // 0' "$DK_FILE" 2>/dev/null || echo 0)
+            SEVERITY=$(jq -r '.meta.severity_filter // "CRITICAL,HIGH"' "$DK_FILE" 2>/dev/null || echo "CRITICAL,HIGH")
+            if [ "$VULN_COUNT" -eq 0 ]; then
+              DD="No vulnerabilities at ${SEVERITY}"
+            else
+              DD="${VULN_COUNT} vulnerability/vulnerabilities at ${SEVERITY}"
+            fi
+          fi
+
           if   [ "$RESULT_SONAR" = "skipped" ];   then SONAR_ST="⏭️ Skipped"
           elif [ "$RESULT_SONAR" = "success" ];  then SONAR_ST="✅ Passed"
           elif [ "$RESULT_SONAR" = "failure" ];  then SONAR_ST="❌ Failed"
@@ -421,6 +561,7 @@ jobs:
             echo "| ⚖️ License Compliance | $(status_icon "$RESULT_LICENSE") | ${LD} |"
             echo "| 🏷️ Release Please | ${REL_ST} | ${RD} |"
             echo "| 📦 SBOM | $(status_icon "$RESULT_SBOM") | ${SBOMD} |"
+            echo "| 🐳 Docker | $(status_icon "$RESULT_DOCKER") | ${DD} |"
             echo ""
             echo "---"
             echo ""
@@ -796,7 +937,98 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ── Step 6: Release Please + SBOM + footer ───────────────────────────
+      # ── Step 6: Docker Best Practices section ───────────────────────────────
+      - name: Report — Docker Best Practices
+        if: always()
+        shell: bash
+        env:
+          RESULT_DOCKER:    ${{ needs.docker-lint.result }}
+          DOCKERFILE_FOUND: ${{ needs.detect-dockerfile.outputs.found }}
+          DOCKERFILE_PATH:  ${{ needs.detect-dockerfile.outputs.path }}
+        run: |
+          set -uo pipefail
+          DK_FILE="./reports/docker/docker-vuln-report.json"
+
+          status_icon() {
+            case "$1" in
+              success)   echo "✅ Passed"    ;;
+              failure)   echo "❌ Failed"    ;;
+              cancelled) echo "🚫 Cancelled" ;;
+              skipped)   echo "⏭️ Skipped"  ;;
+              *)         echo "⬜ Unknown"   ;;
+            esac
+          }
+
+          {
+            echo "### 🐳 Docker Best Practices"
+            echo ""
+
+            if [ "$RESULT_DOCKER" = "skipped" ] || [ "${DOCKERFILE_FOUND:-false}" != "true" ]; then
+              echo "⏭️ _Skipped — no Dockerfile detected in this repository_"
+              echo ""
+              echo "> To enable the Docker pipeline, add a \`Dockerfile\` to the repo root,"
+              echo "> or set \`dockerfile:\` in your CI caller to an explicit path."
+            elif [ ! -f "$DK_FILE" ]; then
+              echo "$(status_icon "$RESULT_DOCKER") _(vulnerability report artifact not available)_"
+              echo ""
+              [ -n "${DOCKERFILE_PATH:-}" ] && echo "> Dockerfile scanned: \`${DOCKERFILE_PATH}\`"
+            else
+              IMAGE=$(jq -r '.meta.image // "unknown"'              "$DK_FILE" 2>/dev/null || echo "unknown")
+              SHA=$(jq -r   '.meta.sha   // "unknown"'              "$DK_FILE" 2>/dev/null || echo "unknown")
+              SEV=$(jq -r   '.meta.severity_filter // "CRITICAL,HIGH"' "$DK_FILE" 2>/dev/null || echo "CRITICAL,HIGH")
+              VULN_COUNT=$(jq '.meta.vulnerability_count // 0'      "$DK_FILE" 2>/dev/null || echo "0")
+
+              if [ "$VULN_COUNT" -eq 0 ]; then
+                echo "**Status: ✅ No vulnerabilities at ${SEV}**"
+              else
+                echo "**Status: ❌ ${VULN_COUNT} vulnerability/vulnerabilities at ${SEV}**"
+              fi
+              echo ""
+              echo "> Dockerfile: \`${DOCKERFILE_PATH}\` | Image: \`${IMAGE}\` | Commit: \`${SHA:0:7}\`"
+              echo ""
+
+              if [ "$VULN_COUNT" -gt 0 ]; then
+                echo "#### Top Vulnerabilities"
+                echo ""
+                echo "| Severity | Package | CVE | Title |"
+                echo "|----------|---------|-----|-------|"
+                jq -r '
+                  .results[]? | .Target as $t |
+                  .Vulnerabilities[]? |
+                  ( .Severity // "UNKNOWN" ) as $sev |
+                  ( .VulnerabilityID // "—" ) as $cve |
+                  ( .PkgName // "unknown" ) as $pkg |
+                  ( .Title // .Description // "—" | gsub("[|]";"\\|") | .[0:80] ) as $title |
+                  "| \($sev) | `\($pkg)` | `\($cve)` | \($title) |"
+                ' "$DK_FILE" 2>/dev/null \
+                  | sort -t'|' -k2 \
+                  | head -20
+                TOTAL=$(jq '[.results[]?.Vulnerabilities // [] | length] | add // 0' "$DK_FILE" 2>/dev/null || echo 0)
+                [ "${TOTAL:-0}" -gt 20 ] && echo "" && echo "_...and $((TOTAL-20)) more. Download the \`docker-vuln-report\` artifact for the full list._"
+                echo ""
+                echo "> **Remediation:** Update the base image to a patched version, or pin specific"
+                echo "> package versions and rebuild. Review the GitHub Security tab for SARIF findings."
+              fi
+
+              echo "<details><summary>📋 Docker pipeline sub-checks</summary>"
+              echo ""
+              echo "| Check | Tool | Purpose |"
+              echo "|-------|------|---------|"
+              echo "| Linting | Hadolint | Dockerfile best-practice rules + ShellCheck |"
+              echo "| IaC Security | Checkov | Misconfigurations (root user, no HEALTHCHECK, :latest tag) |"
+              echo "| CVE Scan | Trivy | OS + language package vulnerabilities, secrets, misconfigs |"
+              echo "| Container SBOM | Syft | SPDX JSON + CycloneDX JSON for the built image |"
+              echo "| Efficiency | Dive | Layer efficiency score (threshold: \`${{ inputs.docker-dive-min-efficiency }}\`) |"
+              echo ""
+              echo "</details>"
+            fi
+
+            echo ""
+            echo "---"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Step 7: Release Please + SBOM + footer ───────────────────────────
       - name: Report — release and SBOM
         if: always()
         shell: bash

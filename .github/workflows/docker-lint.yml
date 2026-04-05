@@ -1,0 +1,762 @@
+name: Docker Best Practices (Reusable)
+
+# Reusable workflow — comprehensive Dockerfile quality, security, and compliance pipeline.
+#
+# Caller usage:
+#   uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+#   with:
+#     dockerfile: "Dockerfile"
+#     image-name: "myapp:ci"
+#   secrets: inherit
+#
+# ── Pipeline stages ───────────────────────────────────────────────────────────
+#
+#   Phase 1 — parallel (no image build needed):
+#     lint   ──► Hadolint (standards/best-practice rules) + Checkov (IaC misconfigs)
+#                + multi-stage build advisory check
+#     build  ──► docker build + OCI label verification + save image artifact
+#
+#   Phase 2 — parallel (needs: [lint, build]):
+#     scan        ──► Trivy CVE scan (OS + lang packages + secrets + misconfigs)
+#                     + optional Grype scan
+#     image-sbom  ──► Syft container SBOM (SPDX + CycloneDX) — skipped if sbom-enable: false
+#     efficiency  ──► Dive image efficiency check — skipped if dive-enable: false
+#
+# ── What SARIF findings appear where ─────────────────────────────────────────
+#   GitHub Security tab  ←  Hadolint · Checkov · Trivy · Grype (when upload-sarif: true)
+#   Workflow artifacts   ←  docker-vuln-report (Trivy JSON) · docker-sbom (SPDX + CycloneDX)
+#
+# ── OCI label injection ───────────────────────────────────────────────────────
+# The build job automatically injects org.opencontainers.image.source,
+# .revision, .created, and .ref.name at build time via --label flags.
+# If enforce-labels is true, the built image is inspected to confirm all
+# required-labels are present (fails the build job if any are missing).
+#
+# ── Multi-stage build advisory ────────────────────────────────────────────────
+# The lint job counts FROM instructions and emits a warning (not a failure) if
+# only one stage is found. This is advisory — some Dockerfiles (e.g. scratch
+# or distroless base images) legitimately use a single stage.
+#
+# ── Image artifact ───────────────────────────────────────────────────────────
+# The build job saves the image as a gzipped tar (docker-image-{sha} artifact,
+# retained for 1 day). Scan, SBOM, and Dive jobs download and re-load it rather
+# than rebuilding, ensuring all stages assess the same binary artifact.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_call:
+    inputs:
+      # ── Dockerfile location ────────────────────────────────────────────────
+      dockerfile:
+        description: "Relative path to the Dockerfile from the repository root"
+        required: false
+        type: string
+        default: "Dockerfile"
+
+      context:
+        description: "Docker build context path"
+        required: false
+        type: string
+        default: "."
+
+      image-name:
+        description: "Name and tag for the built image used during CI (e.g. myapp:ci)"
+        required: false
+        type: string
+        default: "orion-docker-check:ci"
+
+      build-args:
+        description: "Newline-separated Docker build arguments (KEY=VALUE), passed as --build-arg"
+        required: false
+        type: string
+        default: ""
+
+      # ── Static analysis ────────────────────────────────────────────────────
+      hadolint-version:
+        description: "Hadolint version to use (e.g. v2.12.0)"
+        required: false
+        type: string
+        default: "v2.12.0"
+
+      hadolint-ignore:
+        description: "Space-separated Hadolint rule IDs to ignore (e.g. DL3008 SC2035)"
+        required: false
+        type: string
+        default: ""
+
+      checkov-skip-check:
+        description: "Comma-separated Checkov check IDs to skip (e.g. CKV_DOCKER_2,CKV_DOCKER_7)"
+        required: false
+        type: string
+        default: ""
+
+      # ── Vulnerability scanning ─────────────────────────────────────────────
+      trivy-severity:
+        description: "Comma-separated severity levels that trigger a scan failure"
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
+
+      trivy-exit-code:
+        description: "Exit code when vulnerabilities at trivy-severity are found (0 = warn, 1 = fail)"
+        required: false
+        type: number
+        default: 1
+
+      grype-enable:
+        description: "Run a Grype vulnerability scan in addition to Trivy"
+        required: false
+        type: boolean
+        default: false
+
+      # ── Container SBOM ─────────────────────────────────────────────────────
+      sbom-enable:
+        description: "Generate a container image SBOM (SPDX JSON + CycloneDX JSON via Syft)"
+        required: false
+        type: boolean
+        default: true
+
+      sbom-artifact-name:
+        description: "Prefix used for SBOM artifact names uploaded to the workflow run"
+        required: false
+        type: string
+        default: "docker-sbom"
+
+      sbom-attach-to-release:
+        description: "Attach container SBOMs as assets to the GitHub Release (release event only)"
+        required: false
+        type: boolean
+        default: true
+
+      sbom-attest:
+        description: "Publish a signed SBOM attestation to the repo attestation store (requires id-token: write)"
+        required: false
+        type: boolean
+        default: false
+
+      # ── Image efficiency ───────────────────────────────────────────────────
+      dive-enable:
+        description: "Run Dive image efficiency check in CI mode"
+        required: false
+        type: boolean
+        default: true
+
+      dive-min-efficiency:
+        description: "Minimum image efficiency (0.0–1.0). Pipeline fails if the image scores below this"
+        required: false
+        type: number
+        default: 0.9
+
+      # ── OCI label enforcement ──────────────────────────────────────────────
+      enforce-labels:
+        description: "Fail the build job if required OCI labels are absent from the built image"
+        required: false
+        type: boolean
+        default: true
+
+      required-labels:
+        description: "Comma-separated OCI label keys that must be present in the built image"
+        required: false
+        type: string
+        default: "org.opencontainers.image.source,org.opencontainers.image.revision,org.opencontainers.image.created"
+
+      # ── Reporting ──────────────────────────────────────────────────────────
+      upload-sarif:
+        description: "Upload SARIF results to the GitHub Security tab (Code Scanning)"
+        required: false
+        type: boolean
+        default: true
+
+      artifact-retention-days:
+        description: "Retention period in days for uploaded report artifacts"
+        required: false
+        type: number
+        default: 7
+
+      # ── Runner ─────────────────────────────────────────────────────────────
+      runner:
+        description: "GitHub Actions runner label"
+        required: false
+        type: string
+        default: "ubuntu-latest"
+
+permissions:
+  contents: write          # attach SBOMs to GitHub Release assets
+  security-events: write   # upload SARIF to GitHub Security tab
+  id-token: write          # Sigstore OIDC attestation (only used when sbom-attest: true)
+  attestations: write      # store signed attestation
+  actions: read            # code-scanning preflight API call
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 1 — Static Analysis & Linting (runs in parallel with build)
+  # ════════════════════════════════════════════════════════════════════════════
+  lint:
+    name: Static Analysis & Linting
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Multi-stage build advisory ─────────────────────────────────────────
+      # Advisory only: emits a warning when a single-stage Dockerfile is found.
+      # Not all images require multi-stage builds (e.g. pure distroless bases),
+      # so this intentionally never fails the job.
+      - name: Check for multi-stage build
+        shell: bash
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: |
+          FROM_COUNT=$(grep -ciE '^FROM[[:space:]]' "${DOCKERFILE}" || true)
+          echo "FROM instructions found: ${FROM_COUNT}"
+          if [ "${FROM_COUNT}" -lt 2 ]; then
+            echo "::warning file=${DOCKERFILE}::Single-stage build detected. Consider multi-stage builds to minimise final image size and remove build-time tooling from the runtime image."
+          else
+            echo "Multi-stage build confirmed (${FROM_COUNT} FROM instructions)."
+          fi
+
+      # ── Code-scanning preflight ────────────────────────────────────────────
+      # GitHub Code Scanning (SARIF upload) is unavailable on private repos
+      # without Advanced Security. We probe the API and gate all SARIF uploads
+      # behind this check to avoid a hard 403 failure.
+      - name: Check code scanning availability
+        id: sarif-preflight
+        if: inputs.upload-sarif && !cancelled()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL:  ${{ github.api_url }}
+          REPO:     ${{ github.repository }}
+        run: |
+          set +e
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${API_URL}/repos/${REPO}/code-scanning/alerts?per_page=1")
+          set -e
+          if [ "${HTTP_CODE}" = "200" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::SARIF upload skipped — code scanning unavailable (HTTP ${HTTP_CODE}). Enable GitHub Advanced Security or set upload-sarif: false to suppress this warning."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Hadolint ───────────────────────────────────────────────────────────
+      # Gold-standard Dockerfile linter. Checks for:
+      #   • Pinned base image versions (DL3007 / DL3006)
+      #   • WORKDIR usage instead of cd (DL3003)
+      #   • Package manager cache cleanup (DL3009 / DL3015)
+      #   • Shell best-practices via ShellCheck integration (SC*)
+      - name: Hadolint — Dockerfile lint
+        id: hadolint
+        continue-on-error: true
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile:  ${{ inputs.dockerfile }}
+          ignore:      ${{ inputs.hadolint-ignore }}
+          format:      sarif
+          output-file: hadolint.sarif
+          no-fail:     false
+
+      - name: Upload Hadolint SARIF
+        if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: hadolint.sarif
+          category:   hadolint-dockerfile
+
+      # ── Checkov ────────────────────────────────────────────────────────────
+      # IaC security scanner — Dockerfile-specific checks include:
+      #   • CKV_DOCKER_2  — HEALTHCHECK instruction missing
+      #   • CKV_DOCKER_3  — Running as root (missing USER instruction)
+      #   • CKV_DOCKER_7  — Base image uses :latest tag
+      #   • CKV_DOCKER_8  — Secrets exposed via ENV or ARG
+      #   • CKV_DOCKER_9  — SSH daemon (sshd) installed
+      #   • CKV2_DOCKER_1 — Non-root user defined
+      - name: Checkov — IaC security scan
+        id: checkov
+        continue-on-error: true
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          file:             ${{ inputs.dockerfile }}
+          framework:        dockerfile
+          skip_check:       ${{ inputs.checkov-skip-check }}
+          output_format:    cli,sarif
+          output_file_path: console,checkov-results/
+          soft_fail:        false
+
+      - name: Upload Checkov SARIF
+        if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: checkov-results/results_sarif.sarif
+          category:   checkov-dockerfile
+
+      # ── Fail if any linting check failed ──────────────────────────────────
+      - name: Fail if lint checks failed
+        if: steps.hadolint.outcome == 'failure' || steps.checkov.outcome == 'failure'
+        shell: bash
+        run: |
+          FAILED_TOOLS=""
+          [ "${{ steps.hadolint.outcome }}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Hadolint"
+          [ "${{ steps.checkov.outcome }}"  = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Checkov"
+          echo "::error::Dockerfile lint/security check(s) failed:${FAILED_TOOLS}. Review findings in the GitHub Security tab or the job log above."
+          exit 1
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 2 — Build Docker Image (runs in parallel with lint)
+  # ════════════════════════════════════════════════════════════════════════════
+  build:
+    name: Build Docker Image
+    runs-on: ${{ inputs.runner }}
+    outputs:
+      image-name: ${{ steps.meta.outputs.image-name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Resolve final image name and expose as a job output so downstream
+      # jobs can reference the exact same tag without duplicating logic.
+      - name: Resolve image name
+        id: meta
+        shell: bash
+        env:
+          IMAGE_INPUT: ${{ inputs.image-name }}
+        run: |
+          echo "image-name=${IMAGE_INPUT}" >> "$GITHUB_OUTPUT"
+          echo "Building image: ${IMAGE_INPUT}"
+
+      # ── Docker build with OCI label injection ──────────────────────────────
+      # The four core OCI labels (source, revision, created, ref.name) are
+      # always injected at build time. Any labels already declared in the
+      # Dockerfile are preserved; these flags only add or override.
+      - name: Build Docker image
+        shell: bash
+        env:
+          DOCKERFILE: ${{ inputs.context }}
+          CONTEXT:    ${{ inputs.context }}
+          IMAGE_NAME: ${{ steps.meta.outputs.image-name }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+          SHA:        ${{ github.sha }}
+          REF_NAME:   ${{ github.ref_name }}
+          REPO_URL:   ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          LABEL_FLAGS=(
+            "--label" "org.opencontainers.image.source=${REPO_URL}"
+            "--label" "org.opencontainers.image.revision=${SHA}"
+            "--label" "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            "--label" "org.opencontainers.image.ref.name=${REF_NAME}"
+          )
+
+          BUILD_ARG_FLAGS=()
+          if [ -n "${BUILD_ARGS}" ]; then
+            while IFS= read -r arg; do
+              [ -n "${arg}" ] && BUILD_ARG_FLAGS+=("--build-arg" "${arg}")
+            done <<< "${BUILD_ARGS}"
+          fi
+
+          docker build \
+            -f "${{ inputs.dockerfile }}" \
+            -t "${IMAGE_NAME}" \
+            "${LABEL_FLAGS[@]}" \
+            "${BUILD_ARG_FLAGS[@]}" \
+            "${CONTEXT}"
+
+      # ── OCI label verification ─────────────────────────────────────────────
+      # Inspects the built image's metadata to confirm every label key listed
+      # in required-labels is present with a non-empty value.
+      - name: Verify OCI labels
+        if: inputs.enforce-labels
+        shell: bash
+        env:
+          IMAGE_NAME:      ${{ steps.meta.outputs.image-name }}
+          REQUIRED_LABELS: ${{ inputs.required-labels }}
+        run: |
+          echo "Inspecting labels on ${IMAGE_NAME}..."
+          IMAGE_LABELS=$(docker inspect --format '{{json .Config.Labels}}' "${IMAGE_NAME}")
+          echo "Labels found: ${IMAGE_LABELS}"
+
+          MISSING=()
+          IFS=',' read -ra LABELS <<< "${REQUIRED_LABELS}"
+          for label in "${LABELS[@]}"; do
+            label=$(echo "${label}" | xargs)   # trim surrounding whitespace
+            value=$(echo "${IMAGE_LABELS}" | jq -r --arg k "${label}" '.[$k] // empty')
+            if [ -z "${value}" ]; then
+              MISSING+=("${label}")
+            fi
+          done
+
+          if [ "${#MISSING[@]}" -gt 0 ]; then
+            echo "::error::Missing required OCI labels: ${MISSING[*]}"
+            echo "Add these to your Dockerfile with LABEL instructions, or pass them via"
+            echo "build-args in the workflow caller. The build job already injects the four"
+            echo "core OCI labels automatically — verify your Dockerfile does not override them."
+            exit 1
+          fi
+          echo "All required OCI labels verified."
+
+      # ── Save image as artifact ─────────────────────────────────────────────
+      # Saved as a gzipped tar so the scan, SBOM, and efficiency jobs can
+      # load the same binary without re-running docker build.
+      - name: Save Docker image
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ steps.meta.outputs.image-name }}
+        run: |
+          docker save "${IMAGE_NAME}" | gzip > docker-image.tar.gz
+          echo "Artifact size: $(du -sh docker-image.tar.gz | cut -f1)"
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name:              docker-image-${{ github.sha }}
+          path:              docker-image.tar.gz
+          retention-days:    1      # ephemeral — only needed within this workflow run
+          if-no-files-found: error
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 3 — Vulnerability Scanning (CVE check)
+  # ════════════════════════════════════════════════════════════════════════════
+  scan:
+    name: Vulnerability Scanning
+    needs: [lint, build]
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ github.sha }}
+
+      - name: Load Docker image
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ needs.build.outputs.image-name }}
+        run: |
+          docker load < docker-image.tar.gz
+          echo "Loaded: ${IMAGE_NAME}"
+
+      # ── Code-scanning preflight ────────────────────────────────────────────
+      - name: Check code scanning availability
+        id: sarif-preflight
+        if: inputs.upload-sarif && !cancelled()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL:  ${{ github.api_url }}
+          REPO:     ${{ github.repository }}
+        run: |
+          set +e
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${API_URL}/repos/${REPO}/code-scanning/alerts?per_page=1")
+          set -e
+          [ "${HTTP_CODE}" = "200" ] \
+            && echo "available=true"  >> "$GITHUB_OUTPUT" \
+            || echo "available=false" >> "$GITHUB_OUTPUT"
+
+      # ── Trivy — table output (drives pass/fail) ────────────────────────────
+      # Scans OS packages, language-specific dependencies, secrets, and
+      # Dockerfile misconfigurations in a single pass against the built image.
+      - name: Trivy — vulnerability scan (table)
+        id: trivy-table
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref:  ${{ needs.build.outputs.image-name }}
+          scan-type:  image
+          scanners:   vuln,secret,misconfig
+          severity:   ${{ inputs.trivy-severity }}
+          exit-code:  ${{ inputs.trivy-exit-code }}
+          format:     table
+
+      # ── Trivy — JSON output (report artifact) ─────────────────────────────
+      - name: Trivy — vulnerability scan (JSON report)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ${{ needs.build.outputs.image-name }}
+          scan-type: image
+          scanners:  vuln,secret,misconfig
+          severity:  ${{ inputs.trivy-severity }}
+          exit-code: "0"
+          format:    json
+          output:    trivy-report.json
+
+      # ── Trivy — SARIF output (GitHub Security tab) ────────────────────────
+      - name: Trivy — vulnerability scan (SARIF)
+        if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          image-ref: ${{ needs.build.outputs.image-name }}
+          scan-type: image
+          scanners:  vuln,secret,misconfig
+          severity:  ${{ inputs.trivy-severity }}
+          exit-code: "0"
+          format:    sarif
+          output:    trivy.sarif
+
+      - name: Upload Trivy SARIF
+        if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy.sarif
+          category:   trivy-container
+
+      # ── Grype — optional second scanner (SBOM-aware) ──────────────────────
+      # Grype excels at scanning against SBOMs and can catch CVEs that Trivy
+      # may miss in certain language ecosystems. Disabled by default to avoid
+      # doubling scan time on every run.
+      - name: Grype — vulnerability scan
+        id: grype
+        if: inputs.grype-enable
+        continue-on-error: true
+        uses: anchore/scan-action@v3
+        with:
+          image:           ${{ needs.build.outputs.image-name }}
+          fail-build:      true
+          severity-cutoff: high
+          output-format:   sarif
+
+      - name: Upload Grype SARIF
+        if: inputs.grype-enable && !cancelled() && inputs.upload-sarif && steps.sarif-preflight.outputs.available == 'true'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category:   grype-container
+
+      # ── Enrich and persist vulnerability report ────────────────────────────
+      - name: Enrich vulnerability report
+        if: always()
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ needs.build.outputs.image-name }}
+          SHA:        ${{ github.sha }}
+          SEVERITY:   ${{ inputs.trivy-severity }}
+        run: |
+          RAW_FILE="trivy-report.json"
+          [ -f "${RAW_FILE}" ] || echo '{"Results":[]}' > "${RAW_FILE}"
+
+          VULN_COUNT=$(jq '[.Results[].Vulnerabilities // [] | length] | add // 0' "${RAW_FILE}" 2>/dev/null || echo "0")
+
+          jq -n \
+            --argjson raw        "$(cat "${RAW_FILE}")" \
+            --arg     image_name "${IMAGE_NAME}" \
+            --arg     sha        "${SHA}" \
+            --arg     severity   "${SEVERITY}" \
+            --argjson vuln_count "${VULN_COUNT}" \
+            '{
+              meta: {
+                image:               $image_name,
+                sha:                 $sha,
+                severity_filter:     $severity,
+                vulnerability_count: $vuln_count
+              },
+              results: $raw.Results
+            }' > docker-vuln-report.json
+
+      - name: Upload vulnerability report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name:              docker-vuln-report
+          path:              docker-vuln-report.json
+          retention-days:    ${{ inputs.artifact-retention-days }}
+          if-no-files-found: warn
+
+      # ── Fail if Trivy or Grype found issues ────────────────────────────────
+      - name: Fail if vulnerabilities detected
+        if: steps.trivy-table.outcome == 'failure' || (inputs.grype-enable && steps.grype.outcome == 'failure')
+        shell: bash
+        run: |
+          FAILED_TOOLS=""
+          [ "${{ steps.trivy-table.outcome }}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Trivy"
+          [ "${{ steps.grype.outcome }}"        = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Grype"
+          COUNT=$(jq '.meta.vulnerability_count' docker-vuln-report.json 2>/dev/null || echo "unknown")
+          echo "::error::${COUNT} vulnerability/vulnerabilities at severity ${{ inputs.trivy-severity }} detected by:${FAILED_TOOLS}. Review the 'docker-vuln-report' artifact or GitHub Security tab."
+          exit 1
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 4 — Container Image SBOM (Syft)
+  # ════════════════════════════════════════════════════════════════════════════
+  image-sbom:
+    name: Container Image SBOM
+    needs: [lint, build]
+    if: inputs.sbom-enable
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ github.sha }}
+
+      - name: Load Docker image
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ needs.build.outputs.image-name }}
+        run: |
+          docker load < docker-image.tar.gz
+          echo "Loaded: ${IMAGE_NAME}"
+
+      # ── SPDX JSON SBOM ────────────────────────────────────────────────────
+      - name: Generate container SBOM — SPDX JSON
+        uses: anchore/sbom-action@v0
+        with:
+          image:                 ${{ needs.build.outputs.image-name }}
+          format:                spdx-json
+          output-file:           ${{ inputs.sbom-artifact-name }}.spdx.json
+          upload-artifact:       true
+          artifact-name:         ${{ inputs.sbom-artifact-name }}-spdx.json
+          upload-release-assets: ${{ inputs.sbom-attach-to-release && github.event_name == 'release' }}
+
+      # ── CycloneDX JSON SBOM ───────────────────────────────────────────────
+      - name: Generate container SBOM — CycloneDX JSON
+        uses: anchore/sbom-action@v0
+        with:
+          image:                 ${{ needs.build.outputs.image-name }}
+          format:                cyclonedx-json
+          output-file:           ${{ inputs.sbom-artifact-name }}.cyclonedx.json
+          upload-artifact:       true
+          artifact-name:         ${{ inputs.sbom-artifact-name }}-cyclonedx.json
+          upload-release-assets: ${{ inputs.sbom-attach-to-release && github.event_name == 'release' }}
+
+      # ── Optional signed SBOM attestation (Sigstore) ───────────────────────
+      # When sbom-attest is true, a verifiable attestation linking this SBOM
+      # to the exact build is published via GitHub's OIDC token.
+      # Note: the calling workflow must pass id-token: write permission.
+      - name: Get image digest for attestation
+        id: image-digest
+        if: inputs.sbom-attest
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ needs.build.outputs.image-name }}
+        run: |
+          DIGEST=$(docker inspect --format '{{.Id}}' "${IMAGE_NAME}")
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest container SBOM (SPDX)
+        if: inputs.sbom-attest
+        uses: actions/attest-sbom@v1
+        with:
+          subject-name:   ${{ needs.build.outputs.image-name }}
+          subject-digest: ${{ steps.image-digest.outputs.digest }}
+          sbom-path:      ${{ inputs.sbom-artifact-name }}.spdx.json
+
+      # ── Job summary ────────────────────────────────────────────────────────
+      - name: Container SBOM summary
+        shell: bash
+        env:
+          ARTIFACT_NAME: ${{ inputs.sbom-artifact-name }}
+          IMAGE_NAME:    ${{ needs.build.outputs.image-name }}
+          EVENT_NAME:    ${{ github.event_name }}
+          ATTACH:        ${{ inputs.sbom-attach-to-release }}
+        run: |
+          echo "### Container Image SBOM" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Image:** \`${IMAGE_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Format | Artifact |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|----------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SPDX JSON | \`${ARTIFACT_NAME}.spdx.json\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CycloneDX JSON | \`${ARTIFACT_NAME}.cyclonedx.json\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${ATTACH}" = "true" ] && [ "${EVENT_NAME}" = "release" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "Both files attached to GitHub Release **${{ github.ref_name }}**." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Job 5 — Image Efficiency (Dive)
+  # ════════════════════════════════════════════════════════════════════════════
+  efficiency:
+    name: Image Efficiency (Dive)
+    needs: [lint, build]
+    if: inputs.dive-enable
+    runs-on: ${{ inputs.runner }}
+
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ github.sha }}
+
+      - name: Load Docker image
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ needs.build.outputs.image-name }}
+        run: |
+          docker load < docker-image.tar.gz
+          echo "Loaded: ${IMAGE_NAME}"
+
+      # Write a minimal Dive CI config that only enforces the efficiency
+      # threshold. Wasted-byte and wasted-percent rules are disabled so that a
+      # single large but necessary layer does not produce a false failure.
+      - name: Write Dive CI config
+        shell: bash
+        env:
+          MIN_EFFICIENCY: ${{ inputs.dive-min-efficiency }}
+        run: |
+          cat > .dive-ci.yaml << EOF
+          rules:
+            lowestEfficiency: ${MIN_EFFICIENCY}
+            highestWastedBytes: "disabled"
+            highestUserWastedPercent: "disabled"
+          EOF
+
+      # ── Dive — image efficiency check ─────────────────────────────────────
+      # Dive analyses every layer in the image and reports:
+      #   • Total image size and efficiency score
+      #   • Bytes wasted (duplicate or overwritten files across layers)
+      #   • Per-layer file-system delta
+      # CI mode exits non-zero when efficiency < lowestEfficiency threshold.
+      # The Docker socket is mounted so Dive can introspect the local daemon.
+      - name: Dive — image efficiency check
+        id: dive
+        continue-on-error: true
+        shell: bash
+        env:
+          IMAGE_NAME: ${{ needs.build.outputs.image-name }}
+        run: |
+          docker run --rm \
+            -e CI=true \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$(pwd)/.dive-ci.yaml:/.dive-ci.yaml" \
+            wagoodman/dive:latest \
+            --ci-config /.dive-ci.yaml \
+            "${IMAGE_NAME}" 2>&1 | tee dive-output.txt
+          echo "dive_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # ── Job summary ────────────────────────────────────────────────────────
+      - name: Dive efficiency summary
+        if: always()
+        shell: bash
+        env:
+          MIN_EFFICIENCY: ${{ inputs.dive-min-efficiency }}
+        run: |
+          echo "### Image Efficiency (Dive)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Minimum efficiency threshold:** \`${MIN_EFFICIENCY}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat dive-output.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if efficiency below threshold
+        if: steps.dive.outcome == 'failure'
+        shell: bash
+        env:
+          MIN_EFFICIENCY: ${{ inputs.dive-min-efficiency }}
+        run: |
+          echo "::error::Docker image efficiency is below the minimum threshold of ${MIN_EFFICIENCY}."
+          echo "Common causes:"
+          echo "  • Downloading and then deleting files in separate RUN layers"
+          echo "  • Installing dev dependencies that are not cleaned up (apt-get, pip, npm)"
+          echo "  • Copying entire directories when only a subset is needed"
+          echo "Review the Dive output in the job log or lower dive-min-efficiency if intentional."
+          exit 1
