@@ -103,6 +103,12 @@ on:
         type: number
         default: 1
 
+      trivy-ignore-unfixed:
+        description: "Skip CVEs that have no fix available yet (recommended for base image noise)"
+        required: false
+        type: boolean
+        default: false
+
       grype-enable:
         description: "Run a Grype vulnerability scan in addition to Trivy"
         required: false
@@ -469,38 +475,41 @@ jobs:
         continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref:  ${{ needs.build.outputs.image-name }}
-          scan-type:  image
-          scanners:   vuln,secret,misconfig
-          severity:   ${{ inputs.trivy-severity }}
-          exit-code:  ${{ inputs.trivy-exit-code }}
-          format:     table
+          image-ref:       ${{ needs.build.outputs.image-name }}
+          scan-type:       image
+          scanners:        vuln,secret,misconfig
+          severity:        ${{ inputs.trivy-severity }}
+          exit-code:       ${{ inputs.trivy-exit-code }}
+          ignore-unfixed:  ${{ inputs.trivy-ignore-unfixed }}
+          format:          table
 
       # ── Trivy — JSON output (report artifact) ─────────────────────────────
       - name: Trivy — vulnerability scan (JSON report)
         if: always()
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref: ${{ needs.build.outputs.image-name }}
-          scan-type: image
-          scanners:  vuln,secret,misconfig
-          severity:  ${{ inputs.trivy-severity }}
-          exit-code: "0"
-          format:    json
-          output:    trivy-report.json
+          image-ref:       ${{ needs.build.outputs.image-name }}
+          scan-type:       image
+          scanners:        vuln,secret,misconfig
+          severity:        ${{ inputs.trivy-severity }}
+          exit-code:       "0"
+          ignore-unfixed:  ${{ inputs.trivy-ignore-unfixed }}
+          format:          json
+          output:          trivy-report.json
 
       # ── Trivy — SARIF output (GitHub Security tab) ────────────────────────
       - name: Trivy — vulnerability scan (SARIF)
         if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
         uses: aquasecurity/trivy-action@v0.35.0
         with:
-          image-ref: ${{ needs.build.outputs.image-name }}
-          scan-type: image
-          scanners:  vuln,secret,misconfig
-          severity:  ${{ inputs.trivy-severity }}
-          exit-code: "0"
-          format:    sarif
-          output:    trivy.sarif
+          image-ref:       ${{ needs.build.outputs.image-name }}
+          scan-type:       image
+          scanners:        vuln,secret,misconfig
+          severity:        ${{ inputs.trivy-severity }}
+          exit-code:       "0"
+          ignore-unfixed:  ${{ inputs.trivy-ignore-unfixed }}
+          format:          sarif
+          output:          trivy.sarif
 
       - name: Upload Trivy SARIF
         if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
