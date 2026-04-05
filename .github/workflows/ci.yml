@@ -135,6 +135,12 @@ on:
         type: string
         default: "CRITICAL,HIGH"
 
+      docker-trivy-ignore-unfixed:
+        description: "Skip CVEs with no fix available (suppresses base image noise where upstream has not patched yet)"
+        required: false
+        type: boolean
+        default: false
+
       docker-dive-enable:
         description: "Run Dive image efficiency check in the Docker pipeline"
         required: false
@@ -280,10 +286,11 @@ jobs:
       needs.detect-dockerfile.outputs.found == 'true'
     uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
     with:
-      dockerfile:          ${{ needs.detect-dockerfile.outputs.path }}
-      image-name:          ${{ inputs.docker-image-name || 'orion-docker-check:ci' }}
-      trivy-severity:      ${{ inputs.docker-trivy-severity }}
-      dive-enable:         ${{ inputs.docker-dive-enable }}
+      dockerfile:             ${{ needs.detect-dockerfile.outputs.path }}
+      image-name:             ${{ inputs.docker-image-name || 'orion-docker-check:ci' }}
+      trivy-severity:         ${{ inputs.docker-trivy-severity }}
+      trivy-ignore-unfixed:   ${{ inputs.docker-trivy-ignore-unfixed }}
+      dive-enable:            ${{ inputs.docker-dive-enable }}
       dive-min-efficiency: ${{ inputs.docker-dive-min-efficiency }}
       grype-enable:        ${{ inputs.docker-grype-enable }}
       sbom-attach-to-release: ${{ github.event_name == 'release' }}
