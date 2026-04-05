@@ -22,7 +22,8 @@ This repository (`orion-digital-solutions/.github`) is the **engineering standar
 
 - **Reusable CI/CD workflows** (`.github/workflows/`) — changes here take effect immediately for every project repository that calls them.
 - **Workflow starter templates** (`workflow-templates/`) — copied into new project repositories to bootstrap CI.
-- **Org-wide community health files** — `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `PULL_REQUEST_TEMPLATE.md`, and issue templates. GitHub automatically surfaces these in any org repository that does not define its own.
+- **Central label definitions** (`labels.yml`) — consumed by the reusable `label-sync` workflow when repositories opt in.
+- **Org-wide community health files** — `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, `PULL_REQUEST_TEMPLATE.md`, and issue templates (YAML forms). GitHub automatically surfaces these in any org repository that does not define its own.
 - **Public org profile** (`profile/README.md`) — rendered on the organization's GitHub landing page.
 
 Because changes to reusable workflows propagate automatically to all consuming repositories **without any action on their part**, this repository carries the highest change-blast-radius in the organization. Its governance is correspondingly stricter than a typical project repository.
@@ -86,6 +87,7 @@ CODEOWNERS in this repository enforces required reviews automatically. See [CODE
 | `SUPPORT.md` | `@orion-digital-solutions/engineering-leads` | Routine |
 | `PULL_REQUEST_TEMPLATE.md` | `@orion-digital-solutions/engineering-leads` | Routine |
 | `ISSUE_TEMPLATE/` | `@orion-digital-solutions/engineering-leads` | Routine |
+| `labels.yml` | `@orion-digital-solutions/devops` + `@orion-digital-solutions/engineering-leads` | Significant |
 | `profile/README.md` | `@orion-digital-solutions/marketing` + `@orion-digital-solutions/engineering-leads` | Routine |
 | `GOVERNANCE.md` (this file) | `@orion-digital-solutions/engineering-leads` + org admin | Breaking |
 

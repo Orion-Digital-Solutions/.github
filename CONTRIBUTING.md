@@ -110,6 +110,7 @@ Every repository uses the Orion shared CI pipeline. It runs automatically on eve
 | **Secret Scanning** | Scans new commits for leaked API keys, tokens, and credentials (Gitleaks) | Any secret pattern detected in the diff |
 | **SonarCloud** | Analyses new/changed code for bugs, vulnerabilities, code smells, and coverage (new code only) | Quality Gate conditions not met on the new code |
 | **License Compliance** | Scans dependencies for forbidden OSS licenses (GPL, AGPL, LGPL family) | A dependency carries a prohibited license |
+| **Docker Best Practices** | If the repo has a Dockerfile (or you set an explicit path): Hadolint, Checkov, image build, Trivy (and optional Grype), Syft, Dive | Dockerfile lint or CVE thresholds per org defaults; skipped entirely if no Dockerfile |
 
 ### What runs on merge to `main`
 
@@ -117,8 +118,8 @@ All of the above, plus:
 
 | Check | What it does |
 |-------|-------------|
-| **Release Please** | Reads Conventional Commit messages since the last release and opens (or updates) a Release PR with bumped version and changelog. Merging the Release PR creates the GitHub Release and Git tag. |
-| **SBOM Generation** | Generates a Software Bill of Materials in SPDX and CycloneDX formats, uploads workflow artifacts, and can attach files to a GitHub Release when a release is created. SBOM is gated on secret scanning and license compliance passing — it does not wait on SonarCloud. |
+| **Release Please** | Reads Conventional Commit messages since the last release and opens (or updates) a Release PR with bumped version and changelog. Merging the Release PR creates the GitHub Release and Git tag. Waits on the Docker job when the orchestrator runs it (skipped if there is no Dockerfile). |
+| **SBOM Generation** | Generates a Software Bill of Materials in SPDX and CycloneDX formats, uploads workflow artifacts, and can attach files to a GitHub Release when a release is created. SBOM is gated on secret scanning and license compliance passing — it does not wait on SonarCloud or Docker. |
 
 SonarCloud is wired with **two org secrets**: `SONAR_TOKEN` runs the scan; `SONAR_ISSUE_RETRIEVAL` powers the detailed Sonar section in the Actions **Summary** (see [README: SonarCloud two tokens](README.md#sonarcloud-two-tokens-scan-vs-report)).
 
@@ -129,7 +130,8 @@ After a run completes, click the workflow run in the **Actions** tab, then click
 - Secret scan status and any findings (secrets are redacted)
 - SonarCloud Quality Gate status, ratings (A–E), and metrics for both overall and new code
 - License violations table with package names and license identifiers (license scanning also feeds **Security → Code scanning** when SARIF upload is enabled)
-- Release and SBOM status (Sonar Summary detail needs `SONAR_ISSUE_RETRIEVAL`; see org README). Download `gitleaks-report` / `license-report` workflow artifacts for full JSON (**7-day** retention).
+- Docker pipeline status and vulnerability highlights when a Dockerfile is present (download `docker-vuln-report` for full JSON)
+- Release and SBOM status (Sonar Summary detail needs `SONAR_ISSUE_RETRIEVAL`; see org README). Download `gitleaks-report` / `license-report` workflow artifacts for full JSON (**7-day** retention where configured).
 
 ### If CI fails on your PR
 
@@ -138,6 +140,7 @@ After a run completes, click the workflow run in the **Actions** tab, then click
 | Secret scan | **Rotate the exposed credential immediately**, even if it looks like a test value. Then remove the secret from git history and add an allowlist entry to `.gitleaks.toml` if it is a genuine false positive. |
 | SonarCloud | Fix the new bugs, vulnerabilities, or coverage gaps introduced by your changes. The check only reports on lines you changed — pre-existing issues will not block your PR. |
 | License compliance | Remove or replace the dependency that carries the forbidden license. Open an issue if you believe the license should be permitted for this project. |
+| Docker / image scan | Address or justify CVE findings (pin base images, upgrade packages, or adjust allowed severities with DevOps approval). Fix Hadolint/Checkov issues or document exceptions. |
 
 ### Generating test coverage
 
