@@ -1,0 +1,104 @@
+name: Docker Best Practices
+
+# Add this file to your repository to run Orion's full Dockerfile quality and
+# security pipeline on every push and pull request.
+#
+# ── What this pipeline checks ────────────────────────────────────────────────
+#
+# 1. Static Analysis & Linting
+#    • Hadolint  — catches common Dockerfile mistakes (unpinned tags, no cache
+#                  cleanup, WORKDIR vs cd, shell best-practices via ShellCheck)
+#    • Checkov   — IaC security scanner: missing HEALTHCHECK, running as root,
+#                  secrets in ENV/ARG, SSH daemon presence, :latest tag usage
+#    • Advisory  — emits a warning when no multi-stage build is detected
+#
+# 2. Vulnerability Scanning
+#    • Trivy     — scans OS packages + language dependencies + secrets +
+#                  misconfigurations inside the built image (fails on CRITICAL/HIGH)
+#    • Grype     — optional second scanner; enable with grype-enable: true
+#
+# 3. Image Metadata & Provenance
+#    • OCI labels — the pipeline injects source, revision, created, and ref.name
+#                   labels at build time and verifies they are present
+#    • SBOM       — Syft generates SPDX JSON + CycloneDX JSON for the container
+#                   image; both are uploaded as workflow artifacts and optionally
+#                   attached to GitHub Releases
+#
+# 4. Build Optimisations
+#    • Dive CI   — measures image layer efficiency; fails if the score drops
+#                  below dive-min-efficiency (default 90 %)
+#
+# ── Setup checklist ──────────────────────────────────────────────────────────
+# 1. Change dockerfile if yours is not named "Dockerfile" at the repo root.
+# 2. Change image-name to a meaningful tag for your project.
+# 3. Remove or adjust trivy-severity / dive-min-efficiency to match your
+#    team's risk tolerance.
+# 4. Enable grype-enable: true if you want a second vulnerability scanner.
+# 5. Commit this file — the shared pipeline handles everything else.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "Dockerfile"
+      - "Dockerfile.*"
+      - ".dockerignore"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - "Dockerfile.*"
+      - ".dockerignore"
+  # Run weekly to catch newly published CVEs even when the Dockerfile is stable
+  schedule:
+    - cron: "0 7 * * 1"
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  docker-lint:
+    name: Docker Best Practices
+    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+    with:
+      # ── Dockerfile location ────────────────────────────────────────────────
+      dockerfile: "Dockerfile"            # path from repo root
+      context: "."                        # docker build context
+
+      # Name and tag used for the image during CI.
+      # This image is never pushed — it is only used for scanning and analysis.
+      image-name: "${{ github.event.repository.name }}:ci"
+
+      # ── Static analysis ────────────────────────────────────────────────────
+      # Uncomment to suppress specific Hadolint rules, e.g.:
+      # hadolint-ignore: "DL3008 DL3009"
+
+      # Uncomment to suppress specific Checkov checks, e.g.:
+      # checkov-skip-check: "CKV_DOCKER_2,CKV_DOCKER_7"
+
+      # ── Vulnerability scanning ─────────────────────────────────────────────
+      # Severity levels that will fail the pipeline.
+      trivy-severity: "CRITICAL,HIGH"     # options: CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN
+      trivy-exit-code: 1                  # set to 0 to warn only (no failure)
+
+      # Enable Grype as a second scanner for broader CVE coverage.
+      grype-enable: false
+
+      # ── Container SBOM ─────────────────────────────────────────────────────
+      sbom-enable: true                   # generate SPDX + CycloneDX SBOMs
+      sbom-attach-to-release: true        # attach to GitHub Releases
+      # sbom-attest: false                # set true to publish signed attestation
+
+      # ── Image efficiency ───────────────────────────────────────────────────
+      dive-enable: true
+      dive-min-efficiency: 0.9            # fail if image efficiency < 90 %
+
+      # ── OCI label enforcement ──────────────────────────────────────────────
+      # The pipeline automatically injects the four standard OCI labels.
+      # Disable if your project intentionally omits them.
+      enforce-labels: true
+
+      # ── Reporting ──────────────────────────────────────────────────────────
+      upload-sarif: true                  # upload findings to GitHub Security tab
+      artifact-retention-days: 7
+    secrets: inherit

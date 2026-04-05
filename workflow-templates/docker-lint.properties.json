@@ -1,0 +1,6 @@
+{
+  "name": "Docker Best Practices",
+  "description": "Comprehensive Dockerfile quality and security pipeline: Hadolint linting, Checkov IaC scanning, Trivy/Grype CVE scanning, Syft container SBOM generation, OCI label enforcement, and Dive image efficiency checks.",
+  "iconName": "octicon container",
+  "categories": ["Security", "Compliance", "Supply Chain", "Docker"]
+}
