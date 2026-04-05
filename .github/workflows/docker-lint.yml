@@ -555,11 +555,11 @@ jobs:
           VULN_COUNT=$(jq '[.Results[].Vulnerabilities // [] | length] | add // 0' "${RAW_FILE}" 2>/dev/null || echo "0")
 
           jq -n \
-            --argjson raw        "$(cat "${RAW_FILE}")" \
-            --arg     image_name "${IMAGE_NAME}" \
-            --arg     sha        "${SHA}" \
-            --arg     severity   "${SEVERITY}" \
-            --argjson vuln_count "${VULN_COUNT}" \
+            --slurpfile raw        "${RAW_FILE}" \
+            --arg        image_name "${IMAGE_NAME}" \
+            --arg        sha        "${SHA}" \
+            --arg        severity   "${SEVERITY}" \
+            --argjson    vuln_count "${VULN_COUNT}" \
             '{
               meta: {
                 image:               $image_name,
@@ -567,7 +567,7 @@ jobs:
                 severity_filter:     $severity,
                 vulnerability_count: $vuln_count
               },
-              results: $raw.Results
+              results: $raw[0].Results
             }' > docker-vuln-report.json
 
       - name: Upload vulnerability report artifact
