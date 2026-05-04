@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"d:/Internal/Orion Project Delivery SDIL/.github\" status)",
+      "Bash(git -C \"d:/Internal/Orion Project Delivery SDIL/.github\" branch -a)",
+      "Bash(git -C \"d:/Internal/Orion Project Delivery SDIL/.github\" show origin/Staging:.github/workflows/Imported_repo_scanning.yml)",
+      "Bash(git -C \"d:/Internal/Orion Project Delivery SDIL/.github\" log --oneline --all)",
+      "Bash(git -C \"d:/Internal/Orion Project Delivery SDIL/.github\" show origin/main:.github/workflows/Imported_repo_scanning.yml)",
+      "Bash(git -C \"d:/Internal/Orion Project Delivery SDIL/.github\" pull --ff-only)"
+    ]
+  }
+}

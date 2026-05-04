@@ -1,4 +1,5 @@
 name: Gitleaks Org Repo Scanner
+run-name: "Gitleaks scan — ${{ github.event.inputs.org }}/${{ github.event.inputs.repo-name }}"
 
 # Manually triggered workflow — scans every branch of any Orion org repo for
 # leaked secrets using Gitleaks and publishes a report artifact + step summary.
