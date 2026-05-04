@@ -1,6 +1,6 @@
 {
   "name": "Orion CI",
-  "description": "Full Orion CI: Gitleaks, SonarCloud (scan + Summary API token), Trivy license compliance, SBOM, Release Please, and a consolidated Actions Summary — one caller workflow.",
+  "description": "Full Orion CI: Gitleaks, SonarCloud (scan + Summary API token), Trivy license compliance, Docker best-practices (when a Dockerfile exists), SBOM, Release Please, and a consolidated Actions Summary — one caller workflow.",
   "iconName": "octicon verified",
   "categories": ["CI/CD", "Security", "Code Quality", "Release Management", "Compliance"]
 }

@@ -36,9 +36,11 @@ This is the **central engineering standards repository** for the Orion Digital S
 │   └── README.md                       Public-facing organization profile page
 │
 ├── ISSUE_TEMPLATE/
-│   ├── bug_report.md                   Default bug report template
-│   ├── feature_request.md              Default feature request template
+│   ├── bug_report.yml                  Default bug report form (GitHub issue form)
+│   ├── feature_request.yml             Default feature request form
 │   └── config.yml                      Disables blank issues; links to support
+│
+├── labels.yml                          Central label definitions (used by label-sync workflow)
 │
 ├── .github/
 │   └── workflows/                      ← Reusable workflows (single source of truth)
@@ -46,16 +48,22 @@ This is the **central engineering standards repository** for the Orion Digital S
 │       ├── sonarcloud.yml              SonarCloud code quality & security scan
 │       ├── secret-scanning.yml         Gitleaks secret detection
 │       ├── license-compliance.yml      OSS license compliance (Trivy)
+│       ├── docker-lint.yml             Dockerfile lint, image CVE scan, container SBOM, Dive
 │       ├── sbom.yml                    SBOM generation (SPDX + CycloneDX)
-│       └── release-please.yml          Automated versioning & GitHub Releases
+│       ├── release-please.yml          Automated versioning & GitHub Releases
+│       ├── label-sync.yml              Sync `labels.yml` to repository labels
+│       └── stale.yml                   Stale issue/PR automation (optional caller)
 │
 ├── workflow-templates/                 ← Starter templates (copied into project repos)
 │   ├── ci.yml + .properties.json       Full Orion CI (calls the orchestrator)
+│   ├── docker-lint.yml + .json         Docker best-practices pipeline only
 │   ├── sonarcloud.yml + .json          SonarCloud only
 │   ├── secret-scanning.yml + .json     Secret scanning only
 │   ├── license-compliance.yml + .json  License compliance only
 │   ├── sbom.yml + .json                SBOM only
 │   ├── release-please.yml + .json      Release automation only
+│   ├── label-sync.yml + .json          Label sync from org defaults
+│   ├── stale.yml + .json               Stale issue/PR workflow
 │   ├── python-ci.yml + .json           Python lint + test
 │   ├── node-ci.yml + .json             Node.js build + test
 │   ├── dependency-review.yml + .json   PR dependency vulnerability review
@@ -126,6 +134,8 @@ See [SonarCloud Setup](#sonarcloud-setup-per-repository) below.
 
 Commit and push the workflow file. The pipeline will run on the next push or PR. Check the **Actions** tab → select the run → **Summary** tab at the top of the run for the consolidated CI report.
 
+The [starter template](workflow-templates/ci.yml) includes `concurrency` so a new push to the same branch cancels any in-progress run of that workflow (saves Actions minutes and avoids redundant scans).
+
 ---
 
 ## One-Time Organization Setup
@@ -178,23 +188,28 @@ The orchestrator is the **recommended way** to adopt CI. One file in your repo c
 The orchestrator runs checks in parallel where possible, then gates release automation on their results:
 
 ```
-Phase 1 (parallel whenever configured — sonar skips if no project key; license skips on release):
+Phase 1 (parallel — sonar skips if no project key; license skips on release):
   ┌─ secret-scan ──────────────────────┐
   ├─ sonarcloud  ──────────────────────┤
-  └─ license-check ───────────────────┘
+  ├─ license-check ────────────────────┤
+  ├─ detect-dockerfile ───────────────►  (always; finds Dockerfile or skips Docker pipeline)
+  └─ docker-lint ─────────────────────►  only if a Dockerfile was found (Hadolint, Checkov,
+                                          Trivy, optional Grype, Syft, Dive)
 
-Phase 2 — two different dependency chains (push to main, or release for sbom only):
-  ├─ release-please   (creates/updates Release PR; needs all Phase 1 jobs)
-  └─ sbom             (generates SBOM artifacts; needs secret-scan + license-check only)
+Phase 2 — push to main (or release for SBOM attach):
+  ├─ release-please   (needs secret-scan, sonarcloud, license-check, docker-lint — all must
+  │                    pass or be skipped; skipped jobs do not block)
+  └─ sbom             (needs secret-scan + license-check only; not gated on SonarCloud)
 
 Release follow-up:
-  └─ When a GitHub Release is created, SBOM can attach to release assets (via orchestrator `release` event and Release Please `generate-sbom-on-release`).
+  └─ When a GitHub Release is created, SBOM can attach to release assets (orchestrator `release`
+     event and Release Please `generate-sbom-on-release`).
 
 Always (regardless of outcome):
-  └─ report           (detailed markdown summary)
+  └─ report           (Actions Summary — Sonar APIs, Gitleaks + license + docker-vuln artifacts)
 ```
 
-Phase 1 jobs run in parallel where possible, so wall-clock time is driven by the slowest of secret scan, SonarCloud, and license check. **SBOM** does not wait on SonarCloud: it is gated on secret scanning and license compliance only, so it can still run if SonarCloud is skipped (for example when `sonar-project-key` is empty) or after those two succeed.
+Phase 1 wall-clock time is driven by the slowest of the scans plus Docker (when enabled). **SBOM** does not wait on SonarCloud or Docker: it is gated on secret scanning and license compliance only, so it can still run if SonarCloud is skipped (for example when `sonar-project-key` is empty) after those two succeed.
 
 ---
 
@@ -242,19 +257,30 @@ with:
 
   # ── Runner ─────────────────────────────────────────────────────────────
   runner: "ubuntu-latest"            # GitHub-hosted runner label for all orchestrator jobs.
+
+  # ── Docker (optional; auto-detected) ───────────────────────────────────
+  dockerfile: ""                     # Explicit Dockerfile path; blank = auto-detect root Dockerfile / Dockerfile.*
+  docker-image-name: ""              # CI image tag (default: orion-docker-check:ci)
+  docker-trivy-severity: "CRITICAL,HIGH"
+  docker-trivy-ignore-unfixed: false  # true = ignore CVEs with no upstream fix yet
+  docker-dive-enable: true
+  docker-dive-min-efficiency: 0.9    # Dive layer efficiency threshold (0.0–1.0)
+  docker-grype-enable: false         # optional second CVE scanner alongside Trivy
 ```
 
 ---
 
 ### What Runs and When
 
-| Event | Secret Scan | SonarCloud | License | Release Please | SBOM |
-|-------|:-----------:|:----------:|:-------:|:--------------:|:----:|
-| `pull_request` | ✅ diff only | ✅ (if project key set) | ✅ | — | — |
-| `push` to `main` | ✅ delta | ✅ (if project key set) | ✅ | ✅ (if `release-type` set) | ✅ |
-| `push` to other branch | ✅ delta | ✅ (if project key set) | ✅ | — | — |
-| `release` created | ✅ delta | ✅ (if project key set) | — (skipped) | — | ✅ (attach to release) |
-| `schedule` (weekly) | ✅ full history | ✅ (if project key set) | ✅ | — | — |
+| Event | Secret Scan | SonarCloud | License | Docker pipeline | Release Please | SBOM |
+|-------|:-----------:|:----------:|:-------:|:-----------------:|:--------------:|:----:|
+| `pull_request` | ✅ diff only | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
+| `push` to `main` | ✅ delta | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | ✅ (if `release-type` set) | ✅ |
+| `push` to other branch | ✅ delta | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
+| `release` created | ✅ delta | ✅ (if project key set) | — (skipped) | ✅ if Dockerfile found | — | ✅ (attach to release) |
+| `schedule` (weekly) | ✅ full history | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
+
+**Docker pipeline** runs only when a `Dockerfile` (or `Dockerfile.*` at up to depth 2) exists, or when you set `dockerfile` to a valid path. If there is no Dockerfile, the Docker job is **skipped** and does not block Release Please.
 
 **Delta scanning** means only changed commits are scanned for secrets on non-schedule events (including `release` triggers, which behave like a push for Gitleaks). SonarCloud still runs a full analysis of the repository on each trigger; Quality Gate and PR decoration focus on **new code** relative to your SonarCloud new-code definition. License compliance runs on the current dependency tree (Trivy) whenever that job is enabled — it is **skipped** on `release` events only. SBOM may run on `release` and attach to the release assets; Release Please may also attach SBOMs when a release is created (see [SBOM on releases (two paths)](#sbom-on-releases-two-paths) below).
 
@@ -277,6 +303,22 @@ jobs:
 ```
 
 Add a `.gitleaks.toml` file to your repository root to allowlist known false positives.
+
+#### Docker best practices only
+
+When you are **not** using the full orchestrator, you can call the shared Docker pipeline directly (you must pass a `dockerfile` path):
+
+```yaml
+jobs:
+  docker:
+    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+    with:
+      dockerfile: Dockerfile
+      image-name: myapp:ci
+    secrets: inherit
+```
+
+The orchestrator already includes Dockerfile detection and this workflow; use the standalone call only for repos that want Docker checks without the rest of Orion CI.
 
 #### SonarCloud only
 
@@ -369,10 +411,11 @@ The report opens with a **Pipeline Dashboard** — a single at-a-glance table sh
 
 | Section | What it shows |
 |---------|---------------|
-| **Pipeline Dashboard** | Overall pass/fail banner, run metadata (trigger, commit, runner, run link), one-row status + detail per stage, quick-navigation links |
+| **Pipeline Dashboard** | Overall pass/fail banner, run metadata (trigger, commit, runner, run link), one-row status + detail per stage (including Docker), quick-navigation links |
 | **Secret Scanning** | Pass/fail, scan type (delta/full), Gitleaks version, findings table with severity/file/line/rule/description/commit link (secrets are redacted), remediation guidance |
 | **SonarCloud** | Quality Gate status, failed gate conditions (expanded when failing), overall metrics table (bugs, vulnerabilities, hotspots, code smells, coverage, duplications, LOC, technical debt as human-readable time, A–E ratings), new code metrics, issue severity breakdown by level, top 15 open issues with severity/type/message/file/line/effort, security hotspots requiring review |
 | **License Compliance** | Pass/fail, packages scanned, forbidden license list in use, violations table with package/version/license/category/severity/source file, full license inventory (collapsed) |
+| **Docker Best Practices** | Skipped when no Dockerfile; otherwise Hadolint/Checkov/Trivy (and optional Grype), Dive efficiency, container SBOM — with sub-check summary and CVE highlights from `docker-vuln-report` |
 | **Release Please** | Whether a release was created, version/tag, link to release notes |
 | **SBOM** | Generation status, output formats, link to release assets |
 
@@ -389,7 +432,7 @@ The detailed SonarCloud blocks in the Summary are built with **`SONAR_ISSUE_RETR
 
 All issue and hotspot entries link directly to SonarCloud so developers can click through to the full context.
 
-Artifact files (`gitleaks-report`, `license-report`) are uploaded on each run for download and audit (**7-day** retention in the reusable workflows).
+Artifact files (`gitleaks-report`, `license-report`, and when Docker runs, `docker-vuln-report` and related Docker artifacts) are uploaded for download and audit (**7-day** retention where set in the reusable workflows; Docker image tar artifacts may use shorter retention — see `docker-lint.yml`).
 
 ### SBOM on releases (two paths)
 
@@ -530,18 +573,18 @@ sonar.coverage.exclusions=**/tests/**,**/__init__.py
 
 ## Updating This Repository
 
-Changes to the `workflows/` directory in this repository take effect **immediately** for every project repo on their next CI run. No changes are needed in individual repos.
+Changes to `.github/workflows/` in this repository take effect **immediately** for every project repo on their next CI run. No changes are needed in individual repos.
 
 ### To update a pipeline org-wide
 
 1. Create a branch: `git checkout -b fix/sonar-coverage-paths`
-2. Edit the relevant file in `workflows/`.
+2. Edit the relevant file under `.github/workflows/`.
 3. Open a PR against `main` — the PR description should clearly state the impact on all consuming repositories.
 4. Merge after review. All repos pick up the change automatically.
 
 ### To add a new reusable workflow
 
-1. Add `workflows/<name>.yml` — the reusable workflow (with `on: workflow_call`).
+1. Add `.github/workflows/<name>.yml` — the reusable workflow (with `on: workflow_call`).
 2. Add `workflow-templates/<name>.yml` — the thin caller template for project repos.
 3. Add `workflow-templates/<name>.properties.json` — metadata for the GitHub workflow template picker.
 4. Document the new workflow in this README under [Using Individual Workflows](#using-individual-workflows).
@@ -550,8 +593,9 @@ Changes to the `workflows/` directory in this repository take effect **immediate
 
 | Area | Who maintains it |
 |------|-----------------|
-| `workflows/` | Engineering leads / DevOps |
+| `.github/workflows/` | Engineering leads / DevOps |
 | `workflow-templates/` | Engineering leads / DevOps |
+| `labels.yml` (with label-sync) | Engineering leads / DevOps |
 | `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md` | Engineering leads |
 | `SECURITY.md` | Security team |
 | `SUPPORT.md` | Engineering leads |

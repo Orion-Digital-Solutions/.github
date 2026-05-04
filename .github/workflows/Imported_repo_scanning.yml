@@ -1,0 +1,194 @@
+name: Gitleaks Org Repo Scanner
+
+# Manually triggered workflow — scans every branch of any Orion org repo for
+# leaked secrets using Gitleaks and publishes a report artifact + step summary.
+#
+# Required org secret: ORG_ACCESS_TOKEN
+#   A classic PAT (or fine-grained token with "Contents: Read") that has access
+#   to all repositories in the orion-digital-solutions organisation.
+#
+# Optional org secret: GITLEAKS_LICENSE
+#   Gitleaks Pro licence key (leave unset to run the free tier).
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo-name:
+        description: "Repository name to scan (e.g. my-service)"
+        required: true
+        type: string
+
+      org:
+        description: "GitHub organisation (default: orion-digital-solutions)"
+        required: false
+        type: string
+        default: "orion-digital-solutions"
+
+      gitleaks-version:
+        description: "Gitleaks version to pin (e.g. v8.18.4)"
+        required: false
+        type: string
+        default: "v8.18.4"
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks-scan:
+    name: Gitleaks — ${{ github.event.inputs.org }}/${{ github.event.inputs.repo-name }}
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Clone the target repo (mirror = all branches, full history) ────
+      - name: Clone ${{ github.event.inputs.org }}/${{ github.event.inputs.repo-name }}
+        env:
+          ORG_ACCESS_TOKEN: ${{ secrets.ORG_ACCESS_TOKEN }}
+          ORG: ${{ github.event.inputs.org }}
+          REPO: ${{ github.event.inputs.repo-name }}
+        run: |
+          git clone \
+            --mirror \
+            "https://x-access-token:${ORG_ACCESS_TOKEN}@github.com/${ORG}/${REPO}.git" \
+            repo.git
+          echo "Cloned ${ORG}/${REPO} (mirror — full history, all refs)"
+
+      # ── 2. Enumerate branches ─────────────────────────────────────────────
+      - name: List branches
+        id: branches
+        run: |
+          BRANCHES=$(git -C repo.git for-each-ref \
+            --format='%(refname:short)' refs/heads/ | paste -sd ', ' -)
+          COUNT=$(git -C repo.git for-each-ref refs/heads/ | wc -l | tr -d ' ')
+          echo "branches=${BRANCHES}" >> "$GITHUB_OUTPUT"
+          echo "count=${COUNT}"       >> "$GITHUB_OUTPUT"
+          echo "Branches found (${COUNT}): ${BRANCHES}"
+
+      # ── 3. Install Gitleaks CLI ───────────────────────────────────────────
+      - name: Install Gitleaks ${{ github.event.inputs.gitleaks-version }}
+        env:
+          VERSION: ${{ github.event.inputs.gitleaks-version }}
+        run: |
+          VER="${VERSION#v}"
+          URL="https://github.com/gitleaks/gitleaks/releases/download/${VERSION}/gitleaks_${VER}_linux_x64.tar.gz"
+          echo "Downloading Gitleaks ${VERSION}"
+          curl -sSL "$URL" | tar -xz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      # ── 4. Scan — full history across all branches ────────────────────────
+      - name: Gitleaks scan (all branches — full history)
+        id: scan
+        continue-on-error: true
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        run: |
+          gitleaks detect \
+            --source repo.git \
+            --log-opts=--all \
+            --report-format json \
+            --report-path gitleaks-report.json \
+            --redact \
+            --exit-code 1
+
+      # ── 5. Normalise — ensure report file always exists ───────────────────
+      - name: Ensure report file exists
+        if: always()
+        run: |
+          [ -f gitleaks-report.json ] || echo "[]" > gitleaks-report.json
+
+      # ── 6. Enrich report with scan metadata ───────────────────────────────
+      - name: Build enriched report
+        if: always()
+        env:
+          ORG: ${{ github.event.inputs.org }}
+          REPO: ${{ github.event.inputs.repo-name }}
+          VERSION: ${{ github.event.inputs.gitleaks-version }}
+          BRANCHES: ${{ steps.branches.outputs.branches }}
+          BRANCH_COUNT: ${{ steps.branches.outputs.count }}
+        run: |
+          jq -n \
+            --argjson findings  "$(cat gitleaks-report.json)" \
+            --arg repo          "${ORG}/${REPO}" \
+            --arg scan_type     "full-history-all-branches" \
+            --arg version       "${VERSION}" \
+            --arg branches      "${BRANCHES}" \
+            --arg branch_count  "${BRANCH_COUNT}" \
+            --arg triggered_by  "${{ github.actor }}" \
+            --arg run_id        "${{ github.run_id }}" \
+            --arg run_url       "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{
+              meta: {
+                repo:             $repo,
+                scan_type:        $scan_type,
+                gitleaks_version: $version,
+                branches_scanned: $branch_count,
+                branches:         $branches,
+                triggered_by:     $triggered_by,
+                run_id:           $run_id,
+                run_url:          $run_url
+              },
+              findings: $findings
+            }' > gitleaks-full-report.json
+
+      # ── 7. Write job summary (Markdown report in the Actions UI) ──────────
+      - name: Write job summary
+        if: always()
+        env:
+          ORG: ${{ github.event.inputs.org }}
+          REPO: ${{ github.event.inputs.repo-name }}
+          VERSION: ${{ github.event.inputs.gitleaks-version }}
+          BRANCH_COUNT: ${{ steps.branches.outputs.count }}
+          BRANCHES: ${{ steps.branches.outputs.branches }}
+        run: |
+          FINDINGS=$(jq '.findings | length' gitleaks-full-report.json 2>/dev/null || echo "0")
+
+          {
+            echo "## Gitleaks Scan Report"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| **Repository** | \`${ORG}/${REPO}\` |"
+            echo "| **Gitleaks version** | \`${VERSION}\` |"
+            echo "| **Branches scanned** | ${BRANCH_COUNT} |"
+            echo "| **Branch list** | \`${BRANCHES}\` |"
+            echo "| **Scan type** | Full history — all branches |"
+            echo "| **Triggered by** | @${{ github.actor }} |"
+            echo "| **Run** | [${{ github.run_id }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo ""
+
+            if [ "${FINDINGS}" -gt 0 ]; then
+              echo "### :warning: ${FINDINGS} Secret(s) Detected"
+              echo ""
+              echo "> Review the \`gitleaks-report\` artifact below and **rotate any exposed credentials immediately**."
+              echo ""
+              echo "| # | Rule ID | File | Commit | Author |"
+              echo "|---|---|---|---|---|"
+              jq -r '.findings | to_entries[] |
+                "| \(.key + 1) | \(.value.RuleID) | `\(.value.File)` | `\(.value.Commit[0:8])` | \(.value.Author) |"' \
+                gitleaks-full-report.json
+            else
+              echo "### :white_check_mark: No Secrets Detected"
+              echo ""
+              echo "Clean scan — no secrets found across all **${BRANCH_COUNT}** branch(es) of \`${ORG}/${REPO}\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 8. Upload report artifact ─────────────────────────────────────────
+      - name: Upload Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report-${{ github.event.inputs.repo-name }}-${{ github.run_id }}
+          path: gitleaks-full-report.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── 9. Fail the job if secrets were found ─────────────────────────────
+      - name: Fail if secrets detected
+        if: steps.scan.outcome == 'failure'
+        run: |
+          COUNT=$(jq '.findings | length' gitleaks-full-report.json 2>/dev/null || echo "unknown")
+          echo "::error::Gitleaks detected ${COUNT} secret(s) in \
+          ${{ github.event.inputs.org }}/${{ github.event.inputs.repo-name }}. \
+          Download the gitleaks-report artifact and rotate any exposed credentials immediately."
+          exit 1

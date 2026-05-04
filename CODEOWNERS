@@ -28,6 +28,9 @@
 # Templates copied into project repos. Same risk surface as workflows/ above.
 workflow-templates/                             @orion-digital-solutions/devops @orion-digital-solutions/engineering-leads
 
+# ── Central labels (label-sync) ────────────────────────────────────────────
+labels.yml                                      @orion-digital-solutions/devops @orion-digital-solutions/engineering-leads
+
 # ── Security policy ────────────────────────────────────────────────────────
 # Vulnerability disclosure process. Requires security team sign-off.
 SECURITY.md                                     @orion-digital-solutions/security
