@@ -29,7 +29,9 @@ name: Docker Best Practices
 #                  below dive-min-efficiency (default 90 %)
 #
 # ── Setup checklist ──────────────────────────────────────────────────────────
-# 1. Change dockerfile if yours is not named "Dockerfile" at the repo root.
+# 1. Set dockerfile + context below to your Dockerfile's location. For a
+#    Dockerfile in a subfolder, use e.g. dockerfile: "apps/api/Dockerfile" and
+#    context: "apps/api" (the path filters below already watch subfolders).
 # 2. Change image-name to a meaningful tag for your project.
 # 3. Remove or adjust trivy-severity / dive-min-efficiency to match your
 #    team's risk tolerance.
@@ -41,14 +43,20 @@ on:
   push:
     branches: [main, develop]
     paths:
+      - "**/Dockerfile"
+      - "**/Dockerfile.*"
       - "Dockerfile"
       - "Dockerfile.*"
+      - "**/.dockerignore"
       - ".dockerignore"
   pull_request:
     branches: [main]
     paths:
+      - "**/Dockerfile"
+      - "**/Dockerfile.*"
       - "Dockerfile"
       - "Dockerfile.*"
+      - "**/.dockerignore"
       - ".dockerignore"
   # Run weekly to catch newly published CVEs even when the Dockerfile is stable
   schedule:
@@ -62,8 +70,8 @@ jobs:
     uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
     with:
       # ── Dockerfile location ────────────────────────────────────────────────
-      dockerfile: "Dockerfile"            # path from repo root
-      context: "."                        # docker build context
+      dockerfile: "Dockerfile"            # path from repo root (e.g. apps/api/Dockerfile)
+      context: "."                        # docker build context (e.g. apps/api for a subfolder Dockerfile)
 
       # Name and tag used for the image during CI.
       # This image is never pushed — it is only used for scanning and analysis.

@@ -259,7 +259,8 @@ with:
   runner: "ubuntu-latest"            # GitHub-hosted runner label for all orchestrator jobs.
 
   # ── Docker (optional; auto-detected) ───────────────────────────────────
-  dockerfile: ""                     # Explicit Dockerfile path; blank = auto-detect root Dockerfile / Dockerfile.*
+  dockerfile: ""                     # Explicit Dockerfile path (e.g. apps/api/Dockerfile); blank = auto-detect (root or subfolder)
+  docker-context: ""                 # Build context; blank = detected Dockerfile's directory ("." for a root Dockerfile)
   docker-image-name: ""              # CI image tag (default: orion-docker-check:ci)
   docker-trivy-severity: "CRITICAL,HIGH"
   docker-trivy-ignore-unfixed: false  # true = ignore CVEs with no upstream fix yet
@@ -280,7 +281,7 @@ with:
 | `release` created | ✅ delta | ✅ (if project key set) | — (skipped) | ✅ if Dockerfile found | — | ✅ (attach to release) |
 | `schedule` (weekly) | ✅ full history | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
 
-**Docker pipeline** runs only when a `Dockerfile` (or `Dockerfile.*` at up to depth 2) exists, or when you set `dockerfile` to a valid path. If there is no Dockerfile, the Docker job is **skipped** and does not block Release Please.
+**Docker pipeline** runs only when a `Dockerfile` exists — at the repo root or in any subdirectory (e.g. `apps/api/Dockerfile`, also matches `Dockerfile.*` variants) — or when you set `dockerfile` to a valid path. Detection prefers a root `Dockerfile`, then picks the shallowest match found in subdirectories (`node_modules`, `.git`, and `vendor` are excluded); the build context defaults to that Dockerfile's directory. If there is no Dockerfile, the Docker job is **skipped** and does not block Release Please.
 
 **Delta scanning** means only changed commits are scanned for secrets on non-schedule events (including `release` triggers, which behave like a push for Gitleaks). SonarCloud still runs a full analysis of the repository on each trigger; Quality Gate and PR decoration focus on **new code** relative to your SonarCloud new-code definition. License compliance runs on the current dependency tree (Trivy) whenever that job is enabled — it is **skipped** on `release` events only. SBOM may run on `release` and attach to the release assets; Release Please may also attach SBOMs when a release is created (see [SBOM on releases (two paths)](#sbom-on-releases-two-paths) below).
 

@@ -114,11 +114,19 @@ on:
         default: "ubuntu-latest"
 
       # ── Docker best-practices pipeline ────────────────────────────────────────
-      # The orchestrator auto-detects any Dockerfile at the repo root. Set
-      # dockerfile to an explicit path to override detection, or leave blank
-      # to let the orchestrator find it (checks Dockerfile, then Dockerfile.*).
+      # The orchestrator auto-detects a Dockerfile anywhere in the repo. It
+      # prefers a bare Dockerfile at the root, then searches subdirectories for
+      # a bare Dockerfile (e.g. apps/api/Dockerfile) or a variant (Dockerfile.*),
+      # picking the shallowest match. Set dockerfile to an explicit path to
+      # override detection, or leave blank to let the orchestrator find it.
       dockerfile:
-        description: "Path to the Dockerfile to scan. Leave blank to auto-detect."
+        description: "Path to the Dockerfile to scan (e.g. apps/api/Dockerfile). Leave blank to auto-detect."
+        required: false
+        type: string
+        default: ""
+
+      docker-context:
+        description: "Docker build context. Leave blank to use the detected Dockerfile's directory (repo root for a root Dockerfile)."
         required: false
         type: string
         default: ""
@@ -222,14 +230,16 @@ jobs:
 
   # ── Dockerfile detection ───────────────────────────────────────────────────
   # Runs in parallel with Phase 1 scans. Checks the caller's repo for a
-  # Dockerfile (or Dockerfile.*) and outputs the path found. This job never
-  # fails so a missing Dockerfile never blocks other Phase 1 jobs.
+  # Dockerfile — at the root OR in any subdirectory (e.g. apps/api/Dockerfile) —
+  # and outputs the path and containing directory found. This job never fails so
+  # a missing Dockerfile never blocks other Phase 1 jobs.
   detect-dockerfile:
     name: Detect Dockerfile
     runs-on: ${{ inputs.runner }}
     outputs:
       found: ${{ steps.check.outputs.found }}
       path:  ${{ steps.check.outputs.path }}
+      dir:   ${{ steps.check.outputs.dir }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -240,38 +250,67 @@ jobs:
         env:
           EXPLICIT_PATH: ${{ inputs.dockerfile }}
         run: |
-          # If the caller provided an explicit path, honour it
+          set -uo pipefail
+
+          # Write found/path/dir outputs; dir is the Dockerfile's directory
+          # ("." for a root Dockerfile) so the build can use it as the context.
+          emit() {
+            local found="$1" path="$2" dir=""
+            [ "${found}" = "true" ] && dir=$(dirname "${path}")
+            echo "found=${found}" >> "$GITHUB_OUTPUT"
+            echo "path=${path}"   >> "$GITHUB_OUTPUT"
+            echo "dir=${dir}"     >> "$GITHUB_OUTPUT"
+          }
+
+          # 1. Honour an explicit path from the caller, if provided.
           if [ -n "${EXPLICIT_PATH}" ]; then
             if [ -f "${EXPLICIT_PATH}" ]; then
-              echo "found=true"            >> "$GITHUB_OUTPUT"
-              echo "path=${EXPLICIT_PATH}" >> "$GITHUB_OUTPUT"
               echo "Dockerfile found at explicit path: ${EXPLICIT_PATH}"
+              emit "true" "${EXPLICIT_PATH}"
             else
               echo "::warning::Dockerfile not found at specified path '${EXPLICIT_PATH}'. Docker pipeline will be skipped."
-              echo "found=false" >> "$GITHUB_OUTPUT"
-              echo "path="       >> "$GITHUB_OUTPUT"
+              emit "false" ""
             fi
             exit 0
           fi
 
-          # Auto-detect: prefer bare Dockerfile, then Dockerfile.* (max depth 2)
-          FOUND_PATH=""
+          # 2. Auto-detect. Prefer a bare Dockerfile at the repo root (the common
+          #    case), then search subdirectories for a bare "Dockerfile"
+          #    (e.g. apps/api/Dockerfile) or a variant name (Dockerfile.*).
+          #    Matching is case-insensitive; doc/text files and vendored / VCS
+          #    directories are excluded. Shallower paths win, ties broken
+          #    alphabetically, so detection is deterministic.
           if [ -f "Dockerfile" ]; then
-            FOUND_PATH="Dockerfile"
-          else
-            FOUND_PATH=$(find . -maxdepth 2 -name "Dockerfile.*" ! -name "*.md" ! -name "*.txt" \
-              | sort | head -1 | sed 's|^\./||')
+            echo "Dockerfile detected at repo root."
+            emit "true" "Dockerfile"
+            exit 0
           fi
 
-          if [ -n "${FOUND_PATH}" ]; then
-            echo "found=true"          >> "$GITHUB_OUTPUT"
-            echo "path=${FOUND_PATH}"  >> "$GITHUB_OUTPUT"
-            echo "Dockerfile detected: ${FOUND_PATH}"
-          else
-            echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "path="       >> "$GITHUB_OUTPUT"
+          CANDIDATES=$(find . \
+              -type d \( -name node_modules -o -name .git -o -name vendor \) -prune -o \
+              -type f \( -iname 'Dockerfile' -o -iname 'Dockerfile.*' \) \
+              ! -iname '*.md' ! -iname '*.txt' \
+              -printf '%d\t%p\n' \
+            | sort -k1,1n -k2 \
+            | cut -f2- \
+            | sed 's|^\./||')
+
+          if [ -z "${CANDIDATES}" ]; then
             echo "No Dockerfile found — Docker pipeline will be skipped."
+            emit "false" ""
+            exit 0
           fi
+
+          COUNT=$(printf '%s\n' "${CANDIDATES}" | grep -c . || true)
+          FOUND_PATH=$(printf '%s\n' "${CANDIDATES}" | head -1)
+
+          echo "Dockerfile candidate(s) found (${COUNT}):"
+          printf '%s\n' "${CANDIDATES}" | sed 's/^/  - /'
+          if [ "${COUNT}" -gt 1 ]; then
+            echo "::warning::Multiple Dockerfiles detected. Using the shallowest match '${FOUND_PATH}'. Set the 'dockerfile' input in your CI caller to scan a specific one."
+          fi
+          echo "Dockerfile detected: ${FOUND_PATH}"
+          emit "true" "${FOUND_PATH}"
 
   # ── Docker best-practices pipeline ────────────────────────────────────────
   # Automatically skipped when detect-dockerfile reports no Dockerfile.
@@ -287,6 +326,7 @@ jobs:
     uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
     with:
       dockerfile:             ${{ needs.detect-dockerfile.outputs.path }}
+      context:                ${{ inputs.docker-context || needs.detect-dockerfile.outputs.dir }}
       image-name:             ${{ inputs.docker-image-name || 'orion-docker-check:ci' }}
       trivy-severity:         ${{ inputs.docker-trivy-severity }}
       trivy-ignore-unfixed:   ${{ inputs.docker-trivy-ignore-unfixed }}
@@ -973,8 +1013,9 @@ jobs:
             if [ "$RESULT_DOCKER" = "skipped" ] || [ "${DOCKERFILE_FOUND:-false}" != "true" ]; then
               echo "⏭️ _Skipped — no Dockerfile detected in this repository_"
               echo ""
-              echo "> To enable the Docker pipeline, add a \`Dockerfile\` to the repo root,"
-              echo "> or set \`dockerfile:\` in your CI caller to an explicit path."
+              echo "> To enable the Docker pipeline, add a \`Dockerfile\` at the repo root or in"
+              echo "> any subdirectory (e.g. \`apps/api/Dockerfile\`), or set \`dockerfile:\` in your"
+              echo "> CI caller to an explicit path."
             elif [ ! -f "$DK_FILE" ]; then
               echo "$(status_icon "$RESULT_DOCKER") _(vulnerability report artifact not available)_"
               echo ""
