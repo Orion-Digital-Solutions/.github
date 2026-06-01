@@ -130,8 +130,12 @@ jobs:
           TOTAL_PKGS=$(jq '[.Results[].Licenses // [] | length] | add // 0' "$RAW_FILE" 2>/dev/null || echo "0")
           VIOLATIONS=$(jq '[.Results[].Licenses // [] | .[] | select(.Category == "forbidden")] | length' "$RAW_FILE" 2>/dev/null || echo "0")
 
+          # Read the raw report via --slurpfile (from the file path) rather than
+          # --argjson "$(cat ...)" — inlining a large report into jq's argv blows
+          # past the kernel ARG_MAX limit ("Argument list too long"). slurpfile
+          # wraps the file's single object in an array, hence $raw[0].
           jq -n \
-            --argjson raw "$(cat "$RAW_FILE")" \
+            --slurpfile raw "$RAW_FILE" \
             --arg forbidden "$FORBIDDEN" \
             --arg severity "$SEVERITY" \
             --argjson total_packages "$TOTAL_PKGS" \
@@ -143,7 +147,7 @@ jobs:
                 total_packages: $total_packages,
                 violation_count: $violation_count
               },
-              results: $raw.Results
+              results: $raw[0].Results
             }' > license-report.json
 
       # ── Upload JSON report artifact ───────────────────────────────────────

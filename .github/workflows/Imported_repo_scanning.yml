@@ -107,8 +107,14 @@ jobs:
           BRANCHES: ${{ steps.branches.outputs.branches }}
           BRANCH_COUNT: ${{ steps.branches.outputs.count }}
         run: |
+          # Read findings via --slurpfile (from the file path) rather than
+          # --argjson "$(cat ...)" — inlining a large report into jq's argv blows
+          # past the kernel ARG_MAX limit ("Argument list too long"). A
+          # full-history all-branches scan can produce a sizeable file. slurpfile
+          # wraps the file's single value (the findings array) in an array, hence
+          # $findings[0].
           jq -n \
-            --argjson findings  "$(cat gitleaks-report.json)" \
+            --slurpfile findings gitleaks-report.json \
             --arg repo          "${ORG}/${REPO}" \
             --arg scan_type     "full-history-all-branches" \
             --arg version       "${VERSION}" \
@@ -128,7 +134,7 @@ jobs:
                 run_id:           $run_id,
                 run_url:          $run_url
               },
-              findings: $findings
+              findings: $findings[0]
             }' > gitleaks-full-report.json
 
       # ── 7. Write job summary (Markdown report in the Actions UI) ──────────
