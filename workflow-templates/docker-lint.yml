@@ -1,7 +1,12 @@
-name: Docker Best Practices
+name: Docker Image Scan (full build + scan)
 
-# Add this file to your repository to run Orion's full Dockerfile quality and
-# security pipeline on every push and pull request.
+# Standalone caller for Orion's FULL Docker image pipeline: Dockerfile lint
+# PLUS image build, Trivy CVE scan, container SBOM (Syft), and Dive efficiency.
+#
+# Note: the day-to-day "Orion CI" orchestrator only LINTS the Dockerfile
+# (docker-build-image defaults to false). Add THIS workflow when you explicitly
+# want CI to build and scan the image (e.g. on-demand, or a CD-style run).
+# Do not add both unless you intend the image to be built in two places.
 #
 # ── What this pipeline checks ────────────────────────────────────────────────
 #
@@ -69,6 +74,11 @@ jobs:
     name: Docker Best Practices
     uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
     with:
+      # ── Image build ────────────────────────────────────────────────────────
+      # Required for this template: the reusable workflow defaults build-image to
+      # false (lint only), so without this the build/scan/SBOM/Dive jobs are skipped.
+      build-image: true
+
       # ── Dockerfile location ────────────────────────────────────────────────
       dockerfile: "Dockerfile"            # path from repo root (e.g. apps/api/Dockerfile)
       context: "."                        # docker build context (e.g. apps/api for a subfolder Dockerfile)

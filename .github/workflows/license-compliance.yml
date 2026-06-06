@@ -68,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # ── Build Trivy config from inputs ───────────────────────────────────
       - name: Prepare Trivy license config
@@ -153,7 +153,7 @@ jobs:
       # ── Upload JSON report artifact ───────────────────────────────────────
       - name: Upload license report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: license-report
           path: license-report.json

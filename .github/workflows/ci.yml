@@ -19,14 +19,17 @@ name: Orion CI Orchestrator (Reusable)
 #     license           ──┘
 #     detect-dockerfile ──► tiny checkout-and-detect job; sets found=true/false (never fails)
 #     docker-lint       ──► needs [detect-dockerfile]; automatically skipped if no Dockerfile
-#                           found — runs Hadolint, Checkov, Trivy, Syft, and Dive in parallel
+#                           found — runs Hadolint + Checkov (Dockerfile lint only by default).
+#                           Build, Trivy, Syft, and Dive run only when docker-build-image: true
+#                           (default false — the image is built/scanned in the CD pipeline).
 #
 #   Phase 2 — after Phase 1 (exact needs differ per job):
 #     release-please  needs [secret-scan, sonarcloud, license-check, docker-lint]
 #                       only on push to main (+ release-type set); opens/updates Release PR
-#     sbom            needs [secret-scan, license-check] only (not SonarCloud)
-#                       on push to main OR release event; workflow uses if: always() so a
-#                       skipped license job (e.g. release event) does not block this job
+#     sbom            needs [secret-scan, sonarcloud, license-check, docker-lint]
+#                       on push to main OR release event. Uses if: always() with a
+#                       failure/cancelled guard, so a skipped job (release-event license,
+#                       no Sonar key, no Dockerfile) does not block it — only a real failure does.
 #
 #   Also — inside release-please reusable workflow (when a release is created):
 #     post-release    may attach SPDX + CycloneDX via anchore/sbom-action when
@@ -167,6 +170,12 @@ on:
         type: boolean
         default: false
 
+      docker-build-image:
+        description: "Build the image in CI and run the image-dependent Docker jobs (CVE scan, container SBOM, Dive). Default false — CI lints the Dockerfile only (Hadolint + Checkov) and the image is built/scanned in your CD pipeline."
+        required: false
+        type: boolean
+        default: false
+
     outputs:
       release-created:
         description: "true if a new GitHub Release was created"
@@ -242,7 +251,7 @@ jobs:
       dir:   ${{ steps.check.outputs.dir }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Locate Dockerfile
         id: check
@@ -328,6 +337,7 @@ jobs:
       dockerfile:             ${{ needs.detect-dockerfile.outputs.path }}
       context:                ${{ inputs.docker-context || needs.detect-dockerfile.outputs.dir }}
       image-name:             ${{ inputs.docker-image-name || 'orion-docker-check:ci' }}
+      build-image:            ${{ inputs.docker-build-image }}
       trivy-severity:         ${{ inputs.docker-trivy-severity }}
       trivy-ignore-unfixed:   ${{ inputs.docker-trivy-ignore-unfixed }}
       dive-enable:            ${{ inputs.docker-dive-enable }}
@@ -361,7 +371,7 @@ jobs:
 
   sbom:
     name: SBOM Generation
-    needs: [secret-scan, license-check]
+    needs: [secret-scan, sonarcloud, license-check, docker-lint]
     if: >-
       always() &&
       (
@@ -389,21 +399,21 @@ jobs:
     steps:
       # ── Download artifacts from Phase 1 jobs ────────────────────────────
       - name: Download Gitleaks report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: gitleaks-report
           path: ./reports/gitleaks
         continue-on-error: true   # artifact may not exist if job was skipped
 
       - name: Download license report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: license-report
           path: ./reports/license
         continue-on-error: true
 
       - name: Download Docker vulnerability report
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: docker-vuln-report
           path: ./reports/docker
@@ -505,6 +515,7 @@ jobs:
           RUN_ID:          ${{ github.run_id }}
           SERVER_URL:      ${{ github.server_url }}
           RUNNER_NAME:     ${{ inputs.runner }}
+          DOCKER_BUILD:    ${{ inputs.docker-build-image }}
         run: |
           set -uo pipefail
           RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
@@ -569,6 +580,7 @@ jobs:
 
           DK_FILE="./reports/docker/docker-vuln-report.json"
           if   [ "$RESULT_DOCKER" = "skipped" ]; then DD="Skipped — no Dockerfile detected"
+          elif [ "$DOCKER_BUILD" != "true" ] && [ "$RESULT_DOCKER" = "success" ]; then DD="Lint passed — image build/scan runs in CD"
           elif [ ! -f "$DK_FILE" ];              then DD="$(status_icon "$RESULT_DOCKER")"
           else
             VULN_COUNT=$(jq '.meta.vulnerability_count // 0' "$DK_FILE" 2>/dev/null || echo 0)
@@ -992,6 +1004,7 @@ jobs:
           RESULT_DOCKER:    ${{ needs.docker-lint.result }}
           DOCKERFILE_FOUND: ${{ needs.detect-dockerfile.outputs.found }}
           DOCKERFILE_PATH:  ${{ needs.detect-dockerfile.outputs.path }}
+          DOCKER_BUILD:     ${{ inputs.docker-build-image }}
         run: |
           set -uo pipefail
           DK_FILE="./reports/docker/docker-vuln-report.json"
@@ -1016,6 +1029,14 @@ jobs:
               echo "> To enable the Docker pipeline, add a \`Dockerfile\` at the repo root or in"
               echo "> any subdirectory (e.g. \`apps/api/Dockerfile\`), or set \`dockerfile:\` in your"
               echo "> CI caller to an explicit path."
+            elif [ "${DOCKER_BUILD:-false}" != "true" ]; then
+              echo "**Status: $(status_icon "$RESULT_DOCKER") — Dockerfile lint only**"
+              echo ""
+              echo "> Hadolint + Checkov ran against the Dockerfile. Image build, CVE scan,"
+              echo "> container SBOM, and Dive efficiency are deferred to the CD pipeline"
+              echo "> (\`docker-build-image\` is disabled in this CI orchestrator)."
+              echo ""
+              [ -n "${DOCKERFILE_PATH:-}" ] && echo "> Dockerfile: \`${DOCKERFILE_PATH}\`"
             elif [ ! -f "$DK_FILE" ]; then
               echo "$(status_icon "$RESULT_DOCKER") _(vulnerability report artifact not available)_"
               echo ""

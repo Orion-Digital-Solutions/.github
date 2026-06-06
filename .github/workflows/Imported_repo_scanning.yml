@@ -183,7 +183,7 @@ jobs:
       # ── 8. Upload report artifact ─────────────────────────────────────────
       - name: Upload Gitleaks report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gitleaks-report-${{ github.event.inputs.repo-name }}-${{ github.run_id }}
           path: gitleaks-full-report.json

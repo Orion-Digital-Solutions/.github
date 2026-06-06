@@ -61,7 +61,7 @@ jobs:
       # Check out THIS .github repo to get the canonical labels.yml.
       # The calling project repo's code is NOT needed for this workflow.
       - name: Checkout orion-digital-solutions/.github (labels source)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: orion-digital-solutions/.github
           ref: main

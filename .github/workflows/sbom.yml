@@ -83,7 +83,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # ── Generate SPDX JSON SBOM ──────────────────────────────────────────
       - name: Generate SBOM — SPDX JSON
@@ -112,7 +112,7 @@ jobs:
       # build, signed via GitHub's OIDC token (no long-lived keys needed).
       - name: Attest SBOM (SPDX)
         if: inputs.attest
-        uses: actions/attest-sbom@v1
+        uses: actions/attest-sbom@v3
         with:
           subject-path: ${{ inputs.scan-path }}
           sbom-path:    ${{ inputs.artifact-name }}.spdx.json

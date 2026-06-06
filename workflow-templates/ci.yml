@@ -50,6 +50,12 @@ jobs:
 
       # ── Docker best-practices pipeline ──────────────────────────────────
       # Auto-detects any Dockerfile at the repo root — no config required.
+      # By default CI only LINTS the Dockerfile (Hadolint + Checkov). The image
+      # is built and CVE-scanned in your CD pipeline. Set docker-build-image: true
+      # only if you want CI to also build + scan + SBOM + Dive the image.
+      #
+      # docker-build-image: false          # true = CI builds & scans the image too
+      #
       # Uncomment and adjust the options below only if you need to override
       # the defaults or point to a non-standard Dockerfile location.
       #
