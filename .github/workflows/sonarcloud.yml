@@ -151,6 +151,14 @@ jobs:
         run: |
           EXTRA_ARGS=""
 
+          # Skip JRE auto-provisioning. SonarScanner CLI 6.x downloads a JRE from
+          # api.sonarcloud.io at bootstrap; that endpoint intermittently returns
+          # HTTP 403 from GitHub-hosted runner IPs (AWS IP-reputation blocking),
+          # failing the scan before analysis even starts. The SonarSource scanner
+          # container already ships a compatible Java 17, so we use it directly and
+          # avoid the fragile network call entirely.
+          EXTRA_ARGS+="-Dsonar.scanner.skipJreProvisioning=true "
+
           # Project key & org are always injected (can be overridden by
           # sonar-project.properties in the calling repo).
           EXTRA_ARGS+="-Dsonar.projectKey=${{ inputs.project-key }} "

@@ -25,7 +25,10 @@ name: Orion CI Orchestrator (Reusable)
 #
 #   Phase 2 — after Phase 1 (exact needs differ per job):
 #     release-please  needs [secret-scan, sonarcloud, license-check, docker-lint]
-#                       only on push to main (+ release-type set); opens/updates Release PR
+#                       only on push to main (+ release-type OR release-manifest set);
+#                       opens/updates Release PR (single-package or monorepo manifest mode)
+#                       *** TEMPORARILY DISABLED org-wide (2026-06-06) — see the
+#                       `false &&` guard on the release-please job to re-enable. ***
 #     sbom            needs [secret-scan, sonarcloud, license-check, docker-lint]
 #                       on push to main OR release event. Uses if: always() with a
 #                       failure/cancelled guard, so a skipped job (release-event license,
@@ -87,10 +90,16 @@ on:
         default: ""
 
       release-type:
-        description: "Release Please release type (python, node, java, maven, gradle, dotnet, go, simple, ...). Leave blank to skip."
+        description: "Release Please release type for a SINGLE-package repo (python, node, java, maven, gradle, dotnet, go, simple, ...). Leave blank to skip, or when using release-manifest."
         required: false
         type: string
         default: ""
+
+      release-manifest:
+        description: "Use Release Please manifest mode for a monorepo with independently versioned packages. Reads release-please-config.json + .release-please-manifest.json at the repo root. Mutually exclusive with release-type."
+        required: false
+        type: boolean
+        default: false
 
       main-branch:
         description: "Name of the default/main branch"
@@ -184,8 +193,11 @@ on:
         description: "Git tag of the new release (e.g. v1.4.0)"
         value: ${{ jobs.release-please.outputs.tag-name }}
       release-version:
-        description: "Version string of the new release (e.g. 1.4.0)"
+        description: "Version string of the new release (e.g. 1.4.0). Empty in manifest mode."
         value: ${{ jobs.release-please.outputs.version }}
+      release-paths:
+        description: "JSON array of package paths released this run (manifest mode; empty otherwise)"
+        value: ${{ jobs.release-please.outputs.paths-released }}
 
     secrets:
       SONAR_TOKEN:
@@ -354,9 +366,16 @@ jobs:
   release-please:
     name: Release Please
     needs: [secret-scan, sonarcloud, license-check, docker-lint]
+    # ── TEMPORARILY DISABLED org-wide (2026-06-06) ───────────────────────────
+    # Release automation is paused until every consuming repo is migrated to the
+    # caller inputs (release-type / release-manifest). The job stays defined so
+    # the report job's `needs` and the workflow outputs still resolve, but the
+    # leading `false` below keeps it permanently skipped.
+    # TO RE-ENABLE: delete the `false &&` line.
     if: >-
+      false &&
       always() &&
-      inputs.release-type != '' &&
+      (inputs.release-type != '' || inputs.release-manifest) &&
       github.event_name == 'push' &&
       github.ref_name == inputs.main-branch &&
       !contains(needs.*.result, 'failure') &&
@@ -364,6 +383,7 @@ jobs:
     uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       release-type:             ${{ inputs.release-type }}
+      manifest-mode:            ${{ inputs.release-manifest }}
       target-branch:            ${{ inputs.main-branch }}
       generate-sbom-on-release: true
       runner:                   ${{ inputs.runner }}
@@ -567,9 +587,10 @@ jobs:
             fi
           fi
 
-          if   [ "$RESULT_RELEASE" = "skipped" ];        then RD="Skipped"
-          elif [ "${RELEASE_CREATED:-}" = "true" ];       then RD="Released ${RELEASE_TAG}"
-          elif [ "$RESULT_RELEASE" = "success" ];         then RD="No release created — PR may be pending"
+          if   [ "$RESULT_RELEASE" = "skipped" ];                              then RD="Skipped"
+          elif [ "${RELEASE_CREATED:-}" = "true" ] && [ -n "${RELEASE_TAG:-}" ]; then RD="Released ${RELEASE_TAG}"
+          elif [ "${RELEASE_CREATED:-}" = "true" ];                            then RD="Released (manifest — multiple packages)"
+          elif [ "$RESULT_RELEASE" = "success" ];                              then RD="No release created — PR may be pending"
           else RD="$(status_icon "$RESULT_RELEASE")"
           fi
 
@@ -1107,7 +1128,9 @@ jobs:
           RELEASE_CREATED: ${{ needs.release-please.outputs.release-created }}
           RELEASE_TAG:     ${{ needs.release-please.outputs.tag-name }}
           RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+          RELEASE_PATHS:   ${{ needs.release-please.outputs.paths-released }}
           RELEASE_TYPE:    ${{ inputs.release-type }}
+          RELEASE_MANIFEST: ${{ inputs.release-manifest }}
           MAIN_BRANCH:     ${{ inputs.main-branch }}
           REPO:            ${{ github.repository }}
           SERVER_URL:      ${{ github.server_url }}
@@ -1131,10 +1154,13 @@ jobs:
             if [ "$RESULT_RELEASE" = "skipped" ]; then
               echo "⏭️ _Skipped_"
               echo ""
-              [ -z "${RELEASE_TYPE:-}" ] \
-                && echo "> No \`release-type\` configured for this repository." \
-                || echo "> Only runs on push to \`${MAIN_BRANCH}\`."
-            elif [ "${RELEASE_CREATED:-}" = "true" ]; then
+              if [ -z "${RELEASE_TYPE:-}" ] && [ "${RELEASE_MANIFEST:-}" != "true" ]; then
+                echo "> No \`release-type\` or \`release-manifest\` configured for this repository."
+              else
+                echo "> Only runs on push to \`${MAIN_BRANCH}\`."
+              fi
+            elif [ "${RELEASE_CREATED:-}" = "true" ] && [ -n "${RELEASE_TAG:-}" ]; then
+              # Single-package release (one tag)
               echo "**🚀 Release created: [\`${RELEASE_TAG}\`](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG})**"
               echo ""
               echo "| Field | Value |"
@@ -1143,6 +1169,17 @@ jobs:
               echo "| Tag | \`${RELEASE_TAG}\` |"
               echo "| Release notes | [${RELEASE_TAG}](${SERVER_URL}/${REPO}/releases/tag/${RELEASE_TAG}) |"
               echo "| SBOM | Attached to release assets |"
+            elif [ "${RELEASE_CREATED:-}" = "true" ]; then
+              # Manifest release — one or more packages, no single tag
+              echo "**🚀 Release(s) created (manifest mode)**"
+              echo ""
+              echo "Released package paths:"
+              echo ""
+              echo '```json'
+              echo "${RELEASE_PATHS:-[]}"
+              echo '```'
+              echo ""
+              echo "> See the [Releases page](${SERVER_URL}/${REPO}/releases) for per-package tags and notes."
             else
               echo "$(status_icon "$RESULT_RELEASE")"
               echo ""

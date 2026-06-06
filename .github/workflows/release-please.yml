@@ -33,23 +33,50 @@ name: Release Please (Reusable)
 # python, node, java, maven, gradle, go, dotnet, rust, helm, simple, ...
 # Full list: https://github.com/googleapis/release-please?tab=readme-ov-file#release-types
 #
-# ── Configuration file (recommended for complex repos) ───────────────────────
-# Place a release-please-config.json in the calling repo root to configure
-# multiple packages, extra files to bump, or custom changelog sections.
+# ── Monorepo / multi-package (manifest mode) ─────────────────────────────────
+# Set manifest-mode: true and commit a release-please-config.json +
+# .release-please-manifest.json at the repo root. Each package's release-type,
+# version, and changelog sections are configured there (independent SemVer per
+# package). In manifest mode the release-type / changelog-types inputs are
+# ignored — all configuration lives in the config file.
 # See: https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
   workflow_call:
     inputs:
-      # ── Required ────────────────────────────────────────────────────────────
+      # ── Release mode (choose ONE) ─────────────────────────────────────────────
+      # Single-package repo  → set release-type (e.g. node, python).
+      # Monorepo / multi-pkg → set manifest-mode: true and commit a
+      #   release-please-config.json + .release-please-manifest.json at the root.
       release-type:
         description: >
-          Release Please release type. Determines which version file is bumped.
-          Common values: python, node, java, maven, dotnet, go, simple.
-          Use 'simple' if your project has no standard manifest file.
-        required: true
+          Release Please release type for a SINGLE-package repo (python, node,
+          java, maven, dotnet, go, simple). Leave blank when manifest-mode is true.
+        required: false
         type: string
+        default: ""
+
+      manifest-mode:
+        description: >
+          Run Release Please in manifest mode for monorepos with independently
+          versioned packages. Reads config-file + manifest-file. When true,
+          release-type is ignored.
+        required: false
+        type: boolean
+        default: false
+
+      config-file:
+        description: "Path to the Release Please manifest config (manifest-mode only)"
+        required: false
+        type: string
+        default: "release-please-config.json"
+
+      manifest-file:
+        description: "Path to the Release Please versions manifest (manifest-mode only)"
+        required: false
+        type: string
+        default: ".release-please-manifest.json"
 
       # ── Optional — Branch ────────────────────────────────────────────────────
       target-branch:
@@ -118,6 +145,9 @@ on:
       upload-url:
         description: "GitHub Release upload URL for attaching extra assets"
         value: ${{ jobs.release-please.outputs.upload-url }}
+      paths-released:
+        description: "JSON array of package paths released this run (manifest mode; empty otherwise)"
+        value: ${{ jobs.release-please.outputs.paths-released }}
 
 permissions:
   contents: write       # create tags and GitHub Releases
@@ -130,22 +160,40 @@ jobs:
     runs-on: ${{ inputs.runner }}
 
     outputs:
-      release-created: ${{ steps.rp.outputs.release_created }}
+      # Single-package (release-type) and manifest modes expose different outputs;
+      # coalesce them so the caller sees one consistent interface. tag-name/version
+      # are populated only in single-package mode (manifest mode can release many
+      # packages at once — see paths-released).
+      release-created: ${{ steps.rp.outputs.release_created || steps.rpm.outputs.releases_created }}
       tag-name:        ${{ steps.rp.outputs.tag_name }}
       version:         ${{ steps.rp.outputs.version }}
       upload-url:      ${{ steps.rp.outputs.upload_url }}
+      paths-released:  ${{ steps.rpm.outputs.paths_released }}
 
     steps:
-      - name: Run Release Please
+      # Single-package mode — driven by release-type.
+      - name: Run Release Please (single package)
         id: rp
+        if: ${{ !inputs.manifest-mode && inputs.release-type != '' }}
         uses: googleapis/release-please-action@v4
         with:
           release-type:    ${{ inputs.release-type }}
           target-branch:   ${{ inputs.target-branch }}
           changelog-path:  ${{ inputs.changelog-path }}
           changelog-types: ${{ inputs.changelog-types }}
-          # If the caller has a release-please-config.json, Release Please will
-          # use it automatically — no extra config needed here.
+
+      # Manifest mode — monorepo with independently versioned packages.
+      # All per-package release-type, changelog sections, version bumps, pre-1.0
+      # behaviour, extra-files, and plugins are configured in the config file,
+      # NOT via inputs.
+      - name: Run Release Please (manifest / monorepo)
+        id: rpm
+        if: ${{ inputs.manifest-mode }}
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file:   ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
+          target-branch: ${{ inputs.target-branch }}
 
   # ── Step 2: Post-release steps (only runs when a release was just created) ──
   post-release:
@@ -170,7 +218,7 @@ jobs:
           format:                spdx-json
           output-file:           sbom.spdx.json
           upload-artifact:       true
-          artifact-name:         sbom-spdx-${{ needs.release-please.outputs.tag-name }}.json
+          artifact-name:         sbom-spdx-${{ needs.release-please.outputs.tag-name || github.ref_name }}.json
           upload-release-assets: true
 
       - name: Generate SBOM — CycloneDX JSON
@@ -181,20 +229,39 @@ jobs:
           format:                cyclonedx-json
           output-file:           sbom.cyclonedx.json
           upload-artifact:       true
-          artifact-name:         sbom-cyclonedx-${{ needs.release-please.outputs.tag-name }}.json
+          artifact-name:         sbom-cyclonedx-${{ needs.release-please.outputs.tag-name || github.ref_name }}.json
           upload-release-assets: true
 
       # ── Release summary ─────────────────────────────────────────────────
       - name: Release summary
         shell: bash
+        env:
+          TAG:      ${{ needs.release-please.outputs.tag-name }}
+          VERSION:  ${{ needs.release-please.outputs.version }}
+          PATHS:    ${{ needs.release-please.outputs.paths-released }}
+          GEN_SBOM: ${{ inputs.generate-sbom-on-release }}
         run: |
-          echo "### Release ${{ needs.release-please.outputs.tag-name }} created" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Field | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-------|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Tag | \`${{ needs.release-please.outputs.tag-name }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Version | \`${{ needs.release-please.outputs.version }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ inputs.generate-sbom-on-release }}" = "true" ]; then
-            echo "| SBOM (SPDX) | Attached to release |" >> "$GITHUB_STEP_SUMMARY"
-            echo "| SBOM (CycloneDX) | Attached to release |" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            if [ -n "${TAG}" ]; then
+              # Single-package release
+              echo "### Release ${TAG} created"
+              echo ""
+              echo "| Field | Value |"
+              echo "|-------|-------|"
+              echo "| Tag | \`${TAG}\` |"
+              echo "| Version | \`${VERSION}\` |"
+            else
+              # Manifest release — one or more packages
+              echo "### Release(s) created"
+              echo ""
+              echo "Released package paths (manifest mode):"
+              echo ""
+              echo '```json'
+              echo "${PATHS:-[]}"
+              echo '```'
+            fi
+            if [ "${GEN_SBOM}" = "true" ]; then
+              echo ""
+              echo "SBOM (SPDX + CycloneDX) generated and attached to release assets."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

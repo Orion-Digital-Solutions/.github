@@ -30,9 +30,15 @@ jobs:
     uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
     with:
       # ── Release ─────────────────────────────────────────────────────────
-      # Options: python, node, java, maven, dotnet, go, simple
-      # Remove this line to disable automated releases.
+      # SINGLE-package repo: set release-type. Options: python, node, java,
+      # maven, dotnet, go, simple. Remove the line to disable automated releases.
       release-type: python   # <-- change or remove
+      #
+      # MONOREPO (independently versioned packages): remove release-type above
+      # and use manifest mode instead — commit release-please-config.json +
+      # .release-please-manifest.json at the repo root (each package configured
+      # there). Then uncomment:
+      # release-manifest: true
 
       # ── SonarCloud ──────────────────────────────────────────────────────
       # Format: orion-digital-solutions_<repository-name>
