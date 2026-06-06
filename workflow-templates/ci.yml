@@ -50,9 +50,30 @@ jobs:
       # node-version: "20"
       # java-version: "17"
 
-      # ── Coverage reports (generate in a pre-step before calling this) ────
-      # sonar-python-coverage-report: "coverage.xml"
-      # sonar-js-coverage-report: "coverage/lcov.info"
+      # ── SonarCloud COVERAGE (required for the Quality Gate to pass) ──────
+      # The Sonar Way gate requires >=80% coverage on NEW code. This CI does NOT
+      # run your tests — if you import no coverage, Sonar sees 0% and the gate
+      # FAILS. Coverage must be produced by YOUR repo and handed to CI:
+      #
+      #   1. Add a `test` job (above this one) that runs your tests with coverage
+      #      and produces a Sonar-supported report:
+      #         JS/TS  -> coverage/lcov.info   Python -> coverage.xml   (etc.)
+      #   2. That job uploads the report(s) as an artifact, preserving repo-relative
+      #      paths (list each file so the paths are kept):
+      #         - uses: actions/upload-artifact@v7
+      #           with:
+      #             name: coverage-reports
+      #             path: |
+      #               coverage/lcov.info
+      #               coverage.xml
+      #   3. Make THIS job wait for it:   needs: [test]
+      #   4. Name the artifact + point Sonar at the files inside it:
+      #
+      # sonar-coverage-artifact: coverage-reports
+      # sonar-js-coverage-report: coverage/lcov.info
+      # sonar-python-coverage-report: coverage.xml
+      # For other languages, pass raw scanner props instead, e.g.:
+      # sonar-extra-args: "-Dsonar.go.coverage.reportPaths=cov.out"
 
       # ── Docker best-practices pipeline ──────────────────────────────────
       # Auto-detects any Dockerfile at the repo root — no config required.

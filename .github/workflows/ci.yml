@@ -71,6 +71,23 @@ on:
         type: string
         default: ""
 
+      # ── SonarCloud coverage import ────────────────────────────────────────────
+      # SonarCloud's Quality Gate requires coverage on new code. This orchestrator
+      # does NOT run your tests — produce coverage in an EARLIER job in the same run,
+      # upload it as an artifact, then name that artifact here and point the
+      # report-path inputs above at the files inside it. See the caller template.
+      sonar-coverage-artifact:
+        description: "Name of the artifact (from an earlier job) holding coverage report(s) to import into the SonarCloud scan."
+        required: false
+        type: string
+        default: ""
+
+      sonar-extra-args:
+        description: "Extra raw -Dsonar.* properties for the scan (e.g. coverage report paths for languages without a dedicated input)."
+        required: false
+        type: string
+        default: ""
+
       python-version:
         description: "Python version to set up (e.g. '3.11'). Leave blank to skip."
         required: false
@@ -236,6 +253,8 @@ jobs:
       java-version:           ${{ inputs.java-version }}
       python-coverage-report: ${{ inputs.sonar-python-coverage-report }}
       js-coverage-report:     ${{ inputs.sonar-js-coverage-report }}
+      coverage-artifact:      ${{ inputs.sonar-coverage-artifact }}
+      sonar-extra-args:       ${{ inputs.sonar-extra-args }}
       runner:                 ${{ inputs.runner }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

@@ -6,6 +6,17 @@ name: SonarCloud Analysis (Reusable)
 # Secrets: only SONAR_TOKEN is required here (scanner + Quality Gate).
 # The orchestrator CI Report uses SONAR_ISSUE_RETRIEVAL separately — see ci.yml.
 #
+# ── Coverage (IMPORTANT) ──────────────────────────────────────────────────────
+# This workflow does NOT run your tests. The default "Sonar Way" Quality Gate
+# requires ≥80% coverage on NEW code — with no coverage report imported, Sonar
+# sees 0% and the gate FAILS. To provide coverage:
+#   1. An EARLIER job in the same run runs your tests with coverage and produces a
+#      Sonar-supported report (JS/TS → lcov.info, Python → coverage.xml, etc.).
+#   2. That job uploads the report(s) as an artifact (preserving repo-relative paths).
+#   3. Pass `coverage-artifact: <name>` (downloaded here pre-scan) plus the matching
+#      report path via python-coverage-report / js-coverage-report / sonar-extra-args.
+# Coverage is produced by the project repo and handed to CI — CI never runs tests.
+#
 # Caller usage:
 #   uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
 #   with:
@@ -56,6 +67,25 @@ on:
 
       js-coverage-report:
         description: "Path to JS/TS LCOV coverage report (e.g. coverage/lcov.info)"
+        required: false
+        type: string
+        default: ""
+
+      coverage-artifact:
+        description: >
+          Name of a workflow artifact containing coverage report(s) produced by an
+          EARLIER job in the same run. When set, this workflow downloads it into the
+          workspace before scanning so the report paths below resolve. The artifact's
+          internal paths must match the repo-relative paths you pass as report inputs.
+        required: false
+        type: string
+        default: ""
+
+      sonar-extra-args:
+        description: >
+          Extra raw `-Dsonar.*` properties appended to the scan, space-separated.
+          Language-agnostic escape hatch for coverage of languages without a dedicated
+          input above (e.g. '-Dsonar.go.coverage.reportPaths=cov.out').
         required: false
         type: string
         default: ""
@@ -142,6 +172,20 @@ jobs:
           java-version: ${{ inputs.java-version }}
           distribution: temurin
 
+      # ── 2b. Download coverage report(s) from an earlier job ──────────────
+      # This workflow does NOT run your tests — coverage must be produced by an
+      # earlier job in the same run and uploaded as an artifact. We download it
+      # into the workspace root so the report paths resolve at scan time.
+      # continue-on-error: a missing artifact should not mask the scan — the scan
+      # still runs and the Quality Gate reports the (low/zero) coverage clearly.
+      - name: Download coverage artifact (${{ inputs.coverage-artifact }})
+        if: inputs.coverage-artifact != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.coverage-artifact }}
+          path: .
+
       # ── 3. Build Dynamic Sonar Properties ───────────────────────────────
       # If the repo already has a sonar-project.properties file, Sonar will
       # merge these extra args with it. If not, these args define the project.
@@ -177,6 +221,11 @@ jobs:
 
           if [ -n "${{ inputs.js-coverage-report }}" ]; then
             EXTRA_ARGS+="-Dsonar.javascript.lcov.reportPaths=${{ inputs.js-coverage-report }} "
+          fi
+
+          # Language-agnostic passthrough for any other coverage / scanner props.
+          if [ -n "${{ inputs.sonar-extra-args }}" ]; then
+            EXTRA_ARGS+="${{ inputs.sonar-extra-args }} "
           fi
 
           echo "extra_args=${EXTRA_ARGS}" >> "$GITHUB_OUTPUT"
