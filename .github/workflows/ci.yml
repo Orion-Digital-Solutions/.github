@@ -5,23 +5,33 @@ name: Orion CI Orchestrator (Reusable)
 #
 # ── Caller usage (add ONE file to each project repo) ─────────────────────────
 #
-#   uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
-#   with:
-#     sonar-project-key: orion-digital-solutions_my-repo
-#     release-type: python
-#   secrets: inherit
+#   Single project (most repos):
+#     uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
+#     with:
+#       sonar-project-key: orion-digital-solutions_my-repo
+#       release-type: python
+#     secrets: inherit
+#
+#   Monorepo (multiple Sonar projects / Dockerfiles in one repo): pass the list
+#   inputs `sonar-projects` and/or `docker-targets` instead of the scalars above.
+#   Both shapes share one orchestrator — a single project is just a length-1 list.
 #
 # ── Execution model ───────────────────────────────────────────────────────────
 #
 #   Phase 1 — parallel scans (fast feedback, run on every event):
+#     plan              ──► checkout-and-normalise job; turns the scalar inputs OR
+#                           the list inputs into two JSON arrays (sonar-projects,
+#                           docker-targets) + counts. Emits empty arrays when there
+#                           is nothing to do; FAILS LOUDLY on ambiguous/malformed input.
 #     secret-scan       ──┐
-#     sonarcloud        ──┼──► all must pass
-#     license           ──┘
-#     detect-dockerfile ──► tiny checkout-and-detect job; sets found=true/false (never fails)
-#     docker-lint       ──► needs [detect-dockerfile]; automatically skipped if no Dockerfile
-#                           found — runs Hadolint + Checkov (Dockerfile lint only by default).
-#                           Build, Trivy, Syft, and Dive run only when docker-build-image: true
-#                           (default false — the image is built/scanned in the CD pipeline).
+#     sonarcloud        ──┼──► all must pass. sonarcloud is a MATRIX over plan's
+#     license           ──┘   sonar-projects (one leg = one SonarCloud project,
+#                           its own Quality Gate + PR decoration); skipped if count 0.
+#     docker-lint       ──► MATRIX over plan's docker-targets (one leg per Dockerfile,
+#                           each with a unique target-id so artifacts/SARIF never
+#                           collide); skipped if count 0. Hadolint + Checkov (lint
+#                           only by default). Build, Trivy, Syft, Dive run only when
+#                           docker-build-image: true (default false — built in CD).
 #
 #   Phase 2 — after Phase 1 (exact needs differ per job):
 #     release-please  needs [secret-scan, sonarcloud, license-check, docker-lint]
@@ -54,7 +64,31 @@ on:
   workflow_call:
     inputs:
       sonar-project-key:
-        description: "SonarCloud project key (orion-digital-solutions_<repo>). Leave blank to skip."
+        description: "SonarCloud project key (orion-digital-solutions_<repo>) for a SINGLE-project repo. Leave blank to skip, or when using sonar-projects (monorepo)."
+        required: false
+        type: string
+        default: ""
+
+      sonar-sources:
+        description: "Source directory to analyse for the SINGLE-project path (sonar-project-key). Defaults to the repo root. Ignored when sonar-projects is set."
+        required: false
+        type: string
+        default: "."
+
+      # ── Monorepo: multiple SonarCloud projects bound to one repo ──────────────
+      # JSON array — one element per sub-project, each its own SonarCloud project
+      # (own key, own Quality Gate, own PR decoration). Mutually exclusive with the
+      # scalar sonar-project-key above. Each element:
+      #   { "key": "...", "sources": "apps/web",        # required
+      #     "project-name": "...",                       # optional, all below optional
+      #     "node-version": "20", "python-version": "3.12", "java-version": "17",
+      #     "js-coverage-report": "apps/web/coverage/lcov.info",
+      #     "python-coverage-report": "services/py/coverage.xml",
+      #     "coverage-artifact": "web-cov", "sonar-extra-args": "-Dsonar.x=y" }
+      # When a PR touches more than one sub-project, every affected project is
+      # scanned and posts its own project-labelled Quality Gate check.
+      sonar-projects:
+        description: "JSON array of monorepo sub-projects (see ci.yml comments). Mutually exclusive with sonar-project-key. Leave blank for the single-project path."
         required: false
         type: string
         default: ""
@@ -160,6 +194,27 @@ on:
         type: string
         default: ""
 
+      # ── Monorepo: explicitly list the Dockerfiles to lint/scan ────────────────
+      # JSON array — one element per image. Mutually exclusive with the scalar
+      # `dockerfile` input. When set, EXACTLY these targets are processed (full
+      # control). When blank, the orchestrator auto-detects ALL Dockerfiles in the
+      # repo (minus the built-in non-production exclude set and docker-exclude).
+      # Each element:
+      #   { "dockerfile": "apps/api/Dockerfile",   # required
+      #     "context": "apps/api",                  # optional (default: Dockerfile's dir)
+      #     "image-name": "api:ci" }                # optional (default: per-target)
+      docker-targets:
+        description: "JSON array of Dockerfile targets (see ci.yml comments). Mutually exclusive with `dockerfile`. Leave blank to auto-detect all Dockerfiles."
+        required: false
+        type: string
+        default: ""
+
+      docker-exclude:
+        description: "Extra path globs to prune from Dockerfile auto-detection (comma- or space-separated), on top of the built-in non-production excludes (examples, test, tests, fixtures, docs, node_modules, vendor, .git)."
+        required: false
+        type: string
+        default: ""
+
       docker-image-name:
         description: "Name and tag for the CI image (e.g. myapp:ci). Defaults to 'orion-docker-check:ci'."
         required: false
@@ -242,19 +297,31 @@ jobs:
     secrets:
       GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
+  # ── SonarCloud (single OR monorepo, matrixed) ──────────────────────────────
+  # One leg per project resolved by `plan` (the single-project scalar key becomes
+  # a length-1 list). Each leg is its own SonarCloud project with its own Quality
+  # Gate and project-labelled PR decoration. A PR touching several sub-projects
+  # therefore posts a separate gate check per affected project.
   sonarcloud:
-    name: SonarCloud
-    if: inputs.sonar-project-key != ''
+    name: SonarCloud (${{ matrix.proj.key }})
+    needs: [plan]
+    if: needs.plan.outputs.sonar-count > 0
+    strategy:
+      fail-fast: false              # one project's gate failing must not cancel the others
+      matrix:
+        proj: ${{ fromJSON(needs.plan.outputs.sonar-projects) }}
     uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
     with:
-      project-key:            ${{ inputs.sonar-project-key }}
-      python-version:         ${{ inputs.python-version }}
-      node-version:           ${{ inputs.node-version }}
-      java-version:           ${{ inputs.java-version }}
-      python-coverage-report: ${{ inputs.sonar-python-coverage-report }}
-      js-coverage-report:     ${{ inputs.sonar-js-coverage-report }}
-      coverage-artifact:      ${{ inputs.sonar-coverage-artifact }}
-      sonar-extra-args:       ${{ inputs.sonar-extra-args }}
+      project-key:            ${{ matrix.proj.key }}
+      project-name:           ${{ matrix.proj.project-name }}
+      sources:                ${{ matrix.proj.sources }}
+      python-version:         ${{ matrix.proj.python-version }}
+      node-version:           ${{ matrix.proj.node-version }}
+      java-version:           ${{ matrix.proj.java-version }}
+      python-coverage-report: ${{ matrix.proj.python-coverage-report }}
+      js-coverage-report:     ${{ matrix.proj.js-coverage-report }}
+      coverage-artifact:      ${{ matrix.proj.coverage-artifact }}
+      sonar-extra-args:       ${{ matrix.proj.sonar-extra-args }}
       runner:                 ${{ inputs.runner }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -268,114 +335,201 @@ jobs:
       runner:             ${{ inputs.runner }}
     secrets: inherit
 
-  # ── Dockerfile detection ───────────────────────────────────────────────────
-  # Runs in parallel with Phase 1 scans. Checks the caller's repo for a
-  # Dockerfile — at the root OR in any subdirectory (e.g. apps/api/Dockerfile) —
-  # and outputs the path and containing directory found. This job never fails so
-  # a missing Dockerfile never blocks other Phase 1 jobs.
-  detect-dockerfile:
-    name: Detect Dockerfile
+  # ── Plan: resolve Sonar projects + Docker targets (single OR monorepo) ──────
+  # Normalises the scalar inputs (single project / one Dockerfile) and the list
+  # inputs (sonar-projects / docker-targets) into two JSON arrays that the matrix
+  # jobs above fan out over. A single project is just a length-1 array — one
+  # internal code path for both shapes. Runs in parallel with the other Phase 1
+  # scans. Emits empty arrays (→ matrix jobs skip) when there is nothing to do,
+  # but FAILS LOUDLY on a caller error (ambiguous scalar+list, or malformed JSON)
+  # so misconfiguration is never silent.
+  plan:
+    name: Resolve CI plan
     runs-on: ${{ inputs.runner }}
     outputs:
-      found: ${{ steps.check.outputs.found }}
-      path:  ${{ steps.check.outputs.path }}
-      dir:   ${{ steps.check.outputs.dir }}
+      sonar-projects: ${{ steps.resolve.outputs.sonar-projects }}
+      sonar-count:    ${{ steps.resolve.outputs.sonar-count }}
+      docker-targets: ${{ steps.resolve.outputs.docker-targets }}
+      docker-count:   ${{ steps.resolve.outputs.docker-count }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Locate Dockerfile
-        id: check
+      - name: Resolve plan
+        id: resolve
         shell: bash
         env:
-          EXPLICIT_PATH: ${{ inputs.dockerfile }}
+          SONAR_KEY:      ${{ inputs.sonar-project-key }}
+          SONAR_SOURCES:  ${{ inputs.sonar-sources }}
+          SONAR_PROJECTS: ${{ inputs.sonar-projects }}
+          SONAR_PY_COV:   ${{ inputs.sonar-python-coverage-report }}
+          SONAR_JS_COV:   ${{ inputs.sonar-js-coverage-report }}
+          SONAR_COV_ART:  ${{ inputs.sonar-coverage-artifact }}
+          SONAR_EXTRA:    ${{ inputs.sonar-extra-args }}
+          PY_VERSION:     ${{ inputs.python-version }}
+          NODE_VERSION:   ${{ inputs.node-version }}
+          JAVA_VERSION:   ${{ inputs.java-version }}
+          DOCKER_TARGETS: ${{ inputs.docker-targets }}
+          DOCKERFILE:     ${{ inputs.dockerfile }}
+          DOCKER_CONTEXT: ${{ inputs.docker-context }}
+          DOCKER_IMAGE:   ${{ inputs.docker-image-name }}
+          DOCKER_EXCLUDE: ${{ inputs.docker-exclude }}
         run: |
           set -uo pipefail
 
-          # Write found/path/dir outputs; dir is the Dockerfile's directory
-          # ("." for a root Dockerfile) so the build can use it as the context.
-          emit() {
-            local found="$1" path="$2" dir=""
-            [ "${found}" = "true" ] && dir=$(dirname "${path}")
-            echo "found=${found}" >> "$GITHUB_OUTPUT"
-            echo "path=${path}"   >> "$GITHUB_OUTPUT"
-            echo "dir=${dir}"     >> "$GITHUB_OUTPUT"
-          }
+          # ════════════════════════════════════════════════════════════════════
+          # SonarCloud projects → normalised JSON array
+          # ════════════════════════════════════════════════════════════════════
+          if [ -n "${SONAR_PROJECTS}" ] && [ -n "${SONAR_KEY}" ]; then
+            echo "::error::Both 'sonar-project-key' and 'sonar-projects' are set. Pass the scalar key for a single project OR the JSON array for a monorepo — not both."
+            exit 1
+          fi
 
-          # 1. Honour an explicit path from the caller, if provided.
-          if [ -n "${EXPLICIT_PATH}" ]; then
-            if [ -f "${EXPLICIT_PATH}" ]; then
-              echo "Dockerfile found at explicit path: ${EXPLICIT_PATH}"
-              emit "true" "${EXPLICIT_PATH}"
-            else
-              echo "::warning::Dockerfile not found at specified path '${EXPLICIT_PATH}'. Docker pipeline will be skipped."
-              emit "false" ""
+          SONAR_JSON='[]'
+          if [ -n "${SONAR_PROJECTS}" ]; then
+            if ! printf '%s' "${SONAR_PROJECTS}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              echo "::error::'sonar-projects' is not valid JSON (expected an array)."
+              exit 1
             fi
-            exit 0
+            if printf '%s' "${SONAR_PROJECTS}" | jq -e 'length > 0 and any(.[]; (.key // "") == "")' >/dev/null 2>&1; then
+              echo "::error::Every element of 'sonar-projects' must have a non-empty \"key\"."
+              exit 1
+            fi
+            # Default 'sources' to the repo root when an element omits it.
+            SONAR_JSON=$(printf '%s' "${SONAR_PROJECTS}" | jq -c '[ .[] | .sources = (.sources // ".") ]')
+          elif [ -n "${SONAR_KEY}" ]; then
+            # Single-project path → synthesize a length-1 list from the scalar inputs.
+            SONAR_JSON=$(jq -nc \
+              --arg key    "${SONAR_KEY}" \
+              --arg src    "${SONAR_SOURCES:-.}" \
+              --arg pycov  "${SONAR_PY_COV}" \
+              --arg jscov  "${SONAR_JS_COV}" \
+              --arg covart "${SONAR_COV_ART}" \
+              --arg extra  "${SONAR_EXTRA}" \
+              --arg py     "${PY_VERSION}" \
+              --arg node   "${NODE_VERSION}" \
+              --arg java   "${JAVA_VERSION}" \
+              '[{ key: $key, sources: $src,
+                  "python-coverage-report": $pycov,
+                  "js-coverage-report": $jscov,
+                  "coverage-artifact": $covart,
+                  "sonar-extra-args": $extra,
+                  "python-version": $py,
+                  "node-version": $node,
+                  "java-version": $java }]')
+          fi
+          SONAR_COUNT=$(printf '%s' "${SONAR_JSON}" | jq 'length')
+          {
+            echo "sonar-projects=${SONAR_JSON}"
+            echo "sonar-count=${SONAR_COUNT}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved ${SONAR_COUNT} SonarCloud project(s):"
+          printf '%s' "${SONAR_JSON}" | jq -r '.[] | "  - \(.key)  (sources: \(.sources))"' || true
+
+          # ════════════════════════════════════════════════════════════════════
+          # Docker targets → normalised JSON array
+          # ════════════════════════════════════════════════════════════════════
+          if [ -n "${DOCKER_TARGETS}" ] && [ -n "${DOCKERFILE}" ]; then
+            echo "::error::Both 'dockerfile' and 'docker-targets' are set. Pass the scalar path for one image OR the JSON array for several — not both."
+            exit 1
           fi
 
-          # 2. Auto-detect. Prefer a bare Dockerfile at the repo root (the common
-          #    case), then search subdirectories for a bare "Dockerfile"
-          #    (e.g. apps/api/Dockerfile) or a variant name (Dockerfile.*).
-          #    Matching is case-insensitive; doc/text files and vendored / VCS
-          #    directories are excluded. Shallower paths win, ties broken
-          #    alphabetically, so detection is deterministic.
-          if [ -f "Dockerfile" ]; then
-            echo "Dockerfile detected at repo root."
-            emit "true" "Dockerfile"
-            exit 0
+          DOCKER_JSON='[]'
+          if [ -n "${DOCKER_TARGETS}" ]; then
+            # ── Explicit list: lint EXACTLY these (full control) ─────────────
+            if ! printf '%s' "${DOCKER_TARGETS}" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              echo "::error::'docker-targets' is not valid JSON (expected an array)."
+              exit 1
+            fi
+            if printf '%s' "${DOCKER_TARGETS}" | jq -e 'length > 0 and any(.[]; (.dockerfile // "") == "")' >/dev/null 2>&1; then
+              echo "::error::Every element of 'docker-targets' must have a non-empty \"dockerfile\"."
+              exit 1
+            fi
+            # Default context to the Dockerfile's dir; derive target-id slug when absent.
+            DOCKER_JSON=$(printf '%s' "${DOCKER_TARGETS}" | jq -c '
+              def slug: ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("(^-)|(-$)"; "");
+              [ .[] | {
+                  dockerfile: .dockerfile,
+                  context: (.context // (if (.dockerfile | test("/")) then (.dockerfile | sub("/[^/]*$"; "")) else "." end)),
+                  "image-name": (."image-name" // ""),
+                  "target-id": (."target-id" // (.dockerfile | slug))
+              } ]')
+          elif [ -n "${DOCKERFILE}" ]; then
+            # ── Explicit single Dockerfile (back-compat) ─────────────────────
+            if [ -f "${DOCKERFILE}" ]; then
+              if   [ -n "${DOCKER_CONTEXT}" ];      then CTX="${DOCKER_CONTEXT}"
+              elif [[ "${DOCKERFILE}" == */* ]];    then CTX=$(dirname "${DOCKERFILE}")
+              else CTX="."; fi
+              TID=$(printf '%s' "${DOCKERFILE}" | tr '[:upper:]' '[:lower:]' | sed -e 's|[^a-z0-9]\+|-|g' -e 's|^-||' -e 's|-$||')
+              DOCKER_JSON=$(jq -nc --arg df "${DOCKERFILE}" --arg ctx "${CTX}" --arg img "${DOCKER_IMAGE}" --arg tid "${TID}" \
+                '[{dockerfile:$df, context:$ctx, "image-name":$img, "target-id":$tid}]')
+            else
+              echo "::warning::Dockerfile not found at specified path '${DOCKERFILE}'. Docker pipeline will be skipped."
+            fi
+          else
+            # ── Auto-detect ALL Dockerfiles (safest: full coverage) ──────────
+            # Prune vendored/VCS dirs; exclude non-production path segments and
+            # any caller docker-exclude globs. Shallowest-first for stable order.
+            CANDIDATES=$(find . \
+                -type d \( -name node_modules -o -name .git -o -name vendor \) -prune -o \
+                -type f \( -iname 'Dockerfile' -o -iname 'Dockerfile.*' \) \
+                ! -iname '*.md' ! -iname '*.txt' \
+                -printf '%d\t%p\n' \
+              | sort -k1,1n -k2 | cut -f2- | sed 's|^\./||' \
+              | grep -viE '(^|/)(examples|test|tests|fixtures|docs)(/|$)' || true)
+
+            while IFS= read -r f; do
+              [ -z "$f" ] && continue
+              skip=false
+              if [ -n "${DOCKER_EXCLUDE}" ]; then
+                for pat in ${DOCKER_EXCLUDE//,/ }; do
+                  # shellcheck disable=SC2254
+                  case "$f" in $pat) skip=true; break ;; esac
+                done
+              fi
+              if [ "$skip" = true ]; then echo "  - skip (docker-exclude): $f"; continue; fi
+              if [[ "$f" == */* ]]; then CTX=$(dirname "$f"); else CTX="."; fi
+              TID=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]' | sed -e 's|[^a-z0-9]\+|-|g' -e 's|^-||' -e 's|-$||')
+              DOCKER_JSON=$(printf '%s' "${DOCKER_JSON}" | jq -c --arg df "$f" --arg ctx "$CTX" --arg tid "$TID" \
+                '. + [{dockerfile:$df, context:$ctx, "image-name":"", "target-id":$tid}]')
+            done <<< "${CANDIDATES}"
           fi
+          DOCKER_COUNT=$(printf '%s' "${DOCKER_JSON}" | jq 'length')
+          {
+            echo "docker-targets=${DOCKER_JSON}"
+            echo "docker-count=${DOCKER_COUNT}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved ${DOCKER_COUNT} Docker target(s):"
+          printf '%s' "${DOCKER_JSON}" | jq -r '.[] | "  - \(.dockerfile)  (id: \(.["target-id"]), context: \(.context))"' || true
 
-          CANDIDATES=$(find . \
-              -type d \( -name node_modules -o -name .git -o -name vendor \) -prune -o \
-              -type f \( -iname 'Dockerfile' -o -iname 'Dockerfile.*' \) \
-              ! -iname '*.md' ! -iname '*.txt' \
-              -printf '%d\t%p\n' \
-            | sort -k1,1n -k2 \
-            | cut -f2- \
-            | sed 's|^\./||')
-
-          if [ -z "${CANDIDATES}" ]; then
-            echo "No Dockerfile found — Docker pipeline will be skipped."
-            emit "false" ""
-            exit 0
-          fi
-
-          COUNT=$(printf '%s\n' "${CANDIDATES}" | grep -c . || true)
-          FOUND_PATH=$(printf '%s\n' "${CANDIDATES}" | head -1)
-
-          echo "Dockerfile candidate(s) found (${COUNT}):"
-          printf '%s\n' "${CANDIDATES}" | sed 's/^/  - /'
-          if [ "${COUNT}" -gt 1 ]; then
-            echo "::warning::Multiple Dockerfiles detected. Using the shallowest match '${FOUND_PATH}'. Set the 'dockerfile' input in your CI caller to scan a specific one."
-          fi
-          echo "Dockerfile detected: ${FOUND_PATH}"
-          emit "true" "${FOUND_PATH}"
-
-  # ── Docker best-practices pipeline ────────────────────────────────────────
-  # Automatically skipped when detect-dockerfile reports no Dockerfile.
-  # Runs Hadolint + Checkov (lint), Trivy + optional Grype (CVEs),
-  # Syft (container SBOM), and Dive (efficiency) in parallel sub-jobs.
+  # ── Docker best-practices pipeline (single OR monorepo, matrixed) ──────────
+  # One leg per Docker target resolved by `plan` (explicit docker-targets list,
+  # or every auto-detected Dockerfile). Skipped entirely when no target is found.
+  # Each leg passes a per-target `target-id` so artifacts and SARIF categories
+  # never collide across legs (see docker-lint.yml). Runs Hadolint + Checkov
+  # (lint), Trivy + optional Grype (CVEs), Syft (SBOM), Dive (efficiency).
   docker-lint:
-    name: Docker Best Practices
-    needs: [detect-dockerfile]
-    if: >-
-      always() &&
-      needs.detect-dockerfile.result == 'success' &&
-      needs.detect-dockerfile.outputs.found == 'true'
+    name: Docker (${{ matrix.tgt.target-id }})
+    needs: [plan]
+    if: needs.plan.outputs.docker-count > 0
+    strategy:
+      fail-fast: false              # one image's findings must not cancel the others
+      matrix:
+        tgt: ${{ fromJSON(needs.plan.outputs.docker-targets) }}
     uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
     with:
-      dockerfile:             ${{ needs.detect-dockerfile.outputs.path }}
-      context:                ${{ inputs.docker-context || needs.detect-dockerfile.outputs.dir }}
-      image-name:             ${{ inputs.docker-image-name || 'orion-docker-check:ci' }}
+      dockerfile:             ${{ matrix.tgt.dockerfile }}
+      context:                ${{ matrix.tgt.context }}
+      image-name:             ${{ matrix.tgt.image-name || format('orion-docker-check-{0}:ci', matrix.tgt.target-id) }}
+      target-id:              ${{ matrix.tgt.target-id }}
       build-image:            ${{ inputs.docker-build-image }}
       trivy-severity:         ${{ inputs.docker-trivy-severity }}
       trivy-ignore-unfixed:   ${{ inputs.docker-trivy-ignore-unfixed }}
       dive-enable:            ${{ inputs.docker-dive-enable }}
-      dive-min-efficiency: ${{ inputs.docker-dive-min-efficiency }}
-      grype-enable:        ${{ inputs.docker-grype-enable }}
+      dive-min-efficiency:    ${{ inputs.docker-dive-min-efficiency }}
+      grype-enable:           ${{ inputs.docker-grype-enable }}
       sbom-attach-to-release: ${{ github.event_name == 'release' }}
-      runner:              ${{ inputs.runner }}
+      runner:                 ${{ inputs.runner }}
     secrets: inherit
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -431,7 +585,7 @@ jobs:
 
   report:
     name: CI Report
-    needs: [secret-scan, sonarcloud, license-check, release-please, sbom, detect-dockerfile, docker-lint]
+    needs: [plan, secret-scan, sonarcloud, license-check, release-please, sbom, docker-lint]
     if: always()
     runs-on: ${{ inputs.runner }}
 
@@ -451,15 +605,22 @@ jobs:
           path: ./reports/license
         continue-on-error: true
 
-      - name: Download Docker vulnerability report
+      # One artifact per Docker target (suffixed by target-id); each lands in its
+      # own ./reports/docker/<artifact-name>/docker-vuln-report.json subdirectory.
+      # Only exist when docker-lint built + scanned an image (docker-build-image).
+      - name: Download Docker vulnerability reports
         uses: actions/download-artifact@v7
         with:
-          name: docker-vuln-report
+          pattern: docker-vuln-report*
           path: ./reports/docker
-        continue-on-error: true   # only exists when docker-lint ran and completed
+        continue-on-error: true
 
-      # ── Step 1: Fetch SonarCloud data + write shared env ────────────────
-      # Expressions in this step are minimal so it stays well under 21k chars.
+      # ── Step 1: Fetch SonarCloud data (per project) ─────────────────────
+      # Loops over every project resolved by `plan` (one for a single-project
+      # repo, several for a monorepo), writing per-project data under
+      # ./sonar-data/<slug>/. The loop body is constant-size bash and all the
+      # JSON arrives via env, so the step stays well under the 21k-char limit.
+      # Report APIs use SONAR_ISSUE_RETRIEVAL only — SONAR_TOKEN is for the scan.
       - name: Fetch SonarCloud data
         id: sonar-fetch
         if: always()
@@ -467,17 +628,18 @@ jobs:
         env:
           RESULT_SONAR:           ${{ needs.sonarcloud.result }}
           SONAR_ISSUE_RETRIEVAL:  ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
-          PROJECT_KEY:            ${{ inputs.sonar-project-key }}
+          SONAR_PROJECTS:         ${{ needs.plan.outputs.sonar-projects }}
         run: |
           set -uo pipefail
           SONAR_URL="https://sonarcloud.io"
-          QG='{}'; MEASURES='{}'; ISSUES='{}'; HOTSPOT_DATA='{}'; QG_STATUS="UNKNOWN"
+          mkdir -p ./sonar-data
 
-          # Report APIs use SONAR_ISSUE_RETRIEVAL only — SONAR_TOKEN is for the scan job (see workflow_call secrets).
-          if [ -n "${PROJECT_KEY:-}" ] && [ -n "${SONAR_ISSUE_RETRIEVAL:-}" ] && [ "${RESULT_SONAR}" != "skipped" ]; then
+          KEYS=$(printf '%s' "${SONAR_PROJECTS:-[]}" | jq -r '.[].key' 2>/dev/null || true)
+          TOTAL=0; PASS=0
 
-            # Retry helper — retries up to 3 times with 5s backoff; returns '{}' on failure
-            # Uses SONAR_ISSUE_RETRIEVAL token for read-only data retrieval API calls
+          if [ -n "${SONAR_ISSUE_RETRIEVAL:-}" ] && [ "${RESULT_SONAR}" != "skipped" ] && [ -n "${KEYS}" ]; then
+
+            # Retry helper — up to 3 attempts with 5s backoff; returns '{}' on failure.
             sonar_api() {
               local url="$1" attempt body http_code
               for attempt in 1 2 3; do
@@ -486,8 +648,7 @@ jobs:
                 http_code=$(echo "$body" | tail -1)
                 body=$(echo "$body" | sed '$d')
                 if [ "$http_code" = "200" ] && echo "$body" | jq . >/dev/null 2>&1; then
-                  echo "$body"
-                  return 0
+                  echo "$body"; return 0
                 fi
                 echo "::warning::SonarCloud API attempt $attempt failed (HTTP $http_code) for $url" >&2
                 sleep 5
@@ -495,44 +656,48 @@ jobs:
               echo '{}'
             }
 
-            # Poll /api/ce/component until the analysis task is SUCCESS or FAILED (max ~90s)
-            echo "Polling SonarCloud for analysis processing completion..."
-            for i in $(seq 1 18); do
-              TASK_STATUS=$(curl -sf --max-time 10 \
-                -H "Authorization: Bearer ${SONAR_ISSUE_RETRIEVAL}" \
-                "${SONAR_URL}/api/ce/component?component=${PROJECT_KEY}" \
-                2>/dev/null | jq -r '.current.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
-              echo "  attempt $i — task status: ${TASK_STATUS}"
-              if [ "$TASK_STATUS" = "SUCCESS" ] || [ "$TASK_STATUS" = "FAILED" ]; then
-                break
-              fi
-              sleep 5
-            done
-            echo "Proceeding with API data fetch (final task status: ${TASK_STATUS:-UNKNOWN})"
-
-            QG=$(sonar_api "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}")
-
             METRIC_KEYS="bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density"
             METRIC_KEYS="${METRIC_KEYS},security_hotspots,ncloc,sqale_index"
             METRIC_KEYS="${METRIC_KEYS},reliability_rating,security_rating,sqale_rating"
             METRIC_KEYS="${METRIC_KEYS},new_bugs,new_vulnerabilities,new_code_smells"
             METRIC_KEYS="${METRIC_KEYS},new_coverage,new_security_hotspots,new_security_review_rating"
-            MEASURES=$(sonar_api "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}")
 
-            ISSUES=$(sonar_api "${SONAR_URL}/api/issues/search?componentKeys=${PROJECT_KEY}&statuses=OPEN,CONFIRMED,REOPENED&ps=15&s=SEVERITY&asc=false&facets=types,severities")
+            while IFS= read -r PROJECT_KEY; do
+              [ -z "$PROJECT_KEY" ] && continue
+              TOTAL=$((TOTAL+1))
+              D="./sonar-data/$(printf '%s' "$PROJECT_KEY" | sed 's|[^A-Za-z0-9._-]|_|g')"
+              mkdir -p "$D"
+              printf '%s' "$PROJECT_KEY" > "$D/key.txt"
 
-            HOTSPOT_DATA=$(sonar_api "${SONAR_URL}/api/hotspots/search?projectKey=${PROJECT_KEY}&ps=10&status=TO_REVIEW")
+              echo "Polling SonarCloud analysis for ${PROJECT_KEY}..."
+              for _ in $(seq 1 18); do
+                TASK_STATUS=$(curl -sf --max-time 10 \
+                  -H "Authorization: Bearer ${SONAR_ISSUE_RETRIEVAL}" \
+                  "${SONAR_URL}/api/ce/component?component=${PROJECT_KEY}" \
+                  2>/dev/null | jq -r '.current.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+                if [ "$TASK_STATUS" = "SUCCESS" ] || [ "$TASK_STATUS" = "FAILED" ]; then break; fi
+                sleep 5
+              done
 
-            QG_STATUS=$(echo "$QG" | jq -r '.projectStatus.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
+              sonar_api "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}"                                                              > "$D/qg.json"
+              sonar_api "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}"                                              > "$D/measures.json"
+              sonar_api "${SONAR_URL}/api/issues/search?componentKeys=${PROJECT_KEY}&statuses=OPEN,CONFIRMED,REOPENED&ps=15&s=SEVERITY&asc=false&facets=types,severities" > "$D/issues.json"
+              sonar_api "${SONAR_URL}/api/hotspots/search?projectKey=${PROJECT_KEY}&ps=10&status=TO_REVIEW"                                                   > "$D/hotspots.json"
+
+              ST=$(jq -r '.projectStatus.status // "UNKNOWN"' "$D/qg.json" 2>/dev/null || echo "UNKNOWN")
+              [ "$ST" = "OK" ] && PASS=$((PASS+1))
+              printf '%s' "$ST" > "$D/qg_status.txt"
+              echo "  ${PROJECT_KEY}: Quality Gate ${ST}"
+            done <<< "${KEYS}"
+          else
+            # Data can't be fetched (no token / skipped) — still count projects for the dashboard.
+            TOTAL=$(printf '%s' "${SONAR_PROJECTS:-[]}" | jq 'length' 2>/dev/null || echo 0)
           fi
 
-          # Persist to files so subsequent steps can read them without re-fetching
-          mkdir -p ./sonar-data
-          echo "$QG"           > ./sonar-data/qg.json
-          echo "$MEASURES"     > ./sonar-data/measures.json
-          echo "$ISSUES"       > ./sonar-data/issues.json
-          echo "$HOTSPOT_DATA" > ./sonar-data/hotspots.json
-          echo "QG_STATUS=${QG_STATUS}" >> "$GITHUB_ENV"
+          {
+            echo "SONAR_TOTAL=${TOTAL}"
+            echo "SONAR_PASS=${PASS}"
+          } >> "$GITHUB_ENV"
 
       # ── Step 2: Header + dashboard table ────────────────────────────────
       - name: Report — header and dashboard
@@ -555,6 +720,7 @@ jobs:
           SERVER_URL:      ${{ github.server_url }}
           RUNNER_NAME:     ${{ inputs.runner }}
           DOCKER_BUILD:    ${{ inputs.docker-build-image }}
+          DOCKER_TOTAL:    ${{ needs.plan.outputs.docker-count }}
         run: |
           set -uo pipefail
           RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
@@ -587,9 +753,10 @@ jobs:
             [ "$N" -eq 0 ] && SD="No secrets detected" || SD="${N} secret(s) found — rotate credentials"
           fi
 
-          if   [ "$RESULT_SONAR" = "skipped" ]; then SND="Skipped — no project key configured"
-          elif [ "$RESULT_SONAR" = "success" ]; then SND="Quality Gate passed"
-          elif [ "$RESULT_SONAR" = "failure" ]; then SND="Quality Gate failed or scan error"
+          if   [ "$RESULT_SONAR" = "skipped" ];   then SND="Skipped — no project configured"
+          elif [ "${SONAR_TOTAL:-0}" -gt 0 ];     then SND="${SONAR_PASS:-0}/${SONAR_TOTAL} Quality Gate(s) passed"
+          elif [ "$RESULT_SONAR" = "success" ];   then SND="Quality Gate passed"
+          elif [ "$RESULT_SONAR" = "failure" ];   then SND="Quality Gate failed or scan error"
           else SND="$(status_icon "$RESULT_SONAR")"
           fi
 
@@ -618,17 +785,18 @@ jobs:
           else SBOMD="$(status_icon "$RESULT_SBOM")"
           fi
 
-          DK_FILE="./reports/docker/docker-vuln-report.json"
+          DK_FILES=$(find ./reports/docker -name 'docker-vuln-report.json' 2>/dev/null || true)
+          DK_COUNT=$(printf '%s\n' "${DK_FILES}" | grep -c . || true)
           if   [ "$RESULT_DOCKER" = "skipped" ]; then DD="Skipped — no Dockerfile detected"
-          elif [ "$DOCKER_BUILD" != "true" ] && [ "$RESULT_DOCKER" = "success" ]; then DD="Lint passed — image build/scan runs in CD"
-          elif [ ! -f "$DK_FILE" ];              then DD="$(status_icon "$RESULT_DOCKER")"
+          elif [ "$DOCKER_BUILD" != "true" ] && [ "$RESULT_DOCKER" = "success" ]; then DD="Lint passed (${DOCKER_TOTAL:-?} image(s)) — build/scan runs in CD"
+          elif [ "${DK_COUNT:-0}" -eq 0 ];       then DD="$(status_icon "$RESULT_DOCKER")"
           else
-            VULN_COUNT=$(jq '.meta.vulnerability_count // 0' "$DK_FILE" 2>/dev/null || echo 0)
-            SEVERITY=$(jq -r '.meta.severity_filter // "CRITICAL,HIGH"' "$DK_FILE" 2>/dev/null || echo "CRITICAL,HIGH")
-            if [ "$VULN_COUNT" -eq 0 ]; then
-              DD="No vulnerabilities at ${SEVERITY}"
+            TOTAL_VULN=$(printf '%s\n' "${DK_FILES}" | while IFS= read -r f; do [ -n "$f" ] && jq '.meta.vulnerability_count // 0' "$f" 2>/dev/null; done | awk '{s+=$1} END{print s+0}')
+            SEVERITY=$(printf '%s\n' "${DK_FILES}" | head -1 | xargs -r jq -r '.meta.severity_filter // "CRITICAL,HIGH"' 2>/dev/null || echo "CRITICAL,HIGH")
+            if [ "${TOTAL_VULN:-0}" -eq 0 ]; then
+              DD="No vulnerabilities across ${DOCKER_TOTAL:-?} image(s) at ${SEVERITY}"
             else
-              DD="${VULN_COUNT} vulnerability/vulnerabilities at ${SEVERITY}"
+              DD="${TOTAL_VULN} vulnerability/vulnerabilities across ${DOCKER_TOTAL:-?} image(s) at ${SEVERITY}"
             fi
           fi
 
@@ -737,7 +905,7 @@ jobs:
         shell: bash
         env:
           RESULT_SONAR:          ${{ needs.sonarcloud.result }}
-          PROJECT_KEY:           ${{ inputs.sonar-project-key }}
+          SONAR_PROJECTS:        ${{ needs.plan.outputs.sonar-projects }}
           SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
           REPO:                  ${{ github.repository }}
           SERVER_URL:            ${{ github.server_url }}
@@ -767,7 +935,7 @@ jobs:
             local v
             v=$(jq -r --arg k "$1" \
               '.component.measures[]? | select(.metric==$k) | .value // ""' \
-              ./sonar-data/measures.json 2>/dev/null || true)
+              "${D}/measures.json" 2>/dev/null || true)
             [ -n "$v" ] && echo "$v" || echo "N/A"
           }
           # New-code period value (only set when a new-code period exists)
@@ -775,7 +943,7 @@ jobs:
             local v
             v=$(jq -r --arg k "$1" \
               '.component.measures[]? | select(.metric==$k) | .periods[0].value // ""' \
-              ./sonar-data/measures.json 2>/dev/null || true)
+              "${D}/measures.json" 2>/dev/null || true)
             [ -n "$v" ] && echo "$v" || echo "N/A"
           }
 
@@ -784,21 +952,31 @@ jobs:
             echo ""
 
             if [ "$RESULT_SONAR" = "skipped" ]; then
-              echo "⏭️ _Skipped — no \`sonar-project-key\` configured_"
-            elif [ -z "${PROJECT_KEY:-}" ] || [ -z "${SONAR_ISSUE_RETRIEVAL:-}" ]; then
-              echo "$([ "$RESULT_SONAR" = "success" ] && echo "✅" || echo "⚠️") _SonarCloud data not available in report step — check \`SONAR_ISSUE_RETRIEVAL\` secret and \`sonar-project-key\` input_"
+              echo "⏭️ _Skipped — no SonarCloud project configured_"
+            elif [ -z "${SONAR_ISSUE_RETRIEVAL:-}" ]; then
+              echo "$([ "$RESULT_SONAR" = "success" ] && echo "✅" || echo "⚠️") _SonarCloud data not available in report step — check the \`SONAR_ISSUE_RETRIEVAL\` secret_"
             else
-              QG_STATUS="${QG_STATUS:-UNKNOWN}"
-              [ "$QG_STATUS" = "OK" ] && QG_ICON="✅ Passed" || QG_ICON="❌ Failed"
-
-              echo "**Quality Gate: ${QG_ICON}** | [View in SonarCloud](${SONAR_URL}/project/overview?id=${PROJECT_KEY})"
+              echo "**${SONAR_PASS:-0}/${SONAR_TOTAL:-0} project Quality Gate(s) passed**"
               echo ""
 
-              FAILED_CONDS=$(jq -r '
-                .projectStatus.conditions[]? |
-                select(.status=="ERROR") |
-                "| \(.metricKey | gsub("_";" ") | ascii_upcase) | \(.actualValue) | \(.comparator) \(.errorThreshold) |"
-              ' ./sonar-data/qg.json 2>/dev/null || true)
+              # One collapsible block per project (single-project repos have exactly one).
+              while IFS= read -r PROJECT_KEY; do
+                [ -z "$PROJECT_KEY" ] && continue
+                D="./sonar-data/$(printf '%s' "$PROJECT_KEY" | sed 's|[^A-Za-z0-9._-]|_|g')"
+                [ -d "$D" ] || continue
+                QG_STATUS=$(cat "$D/qg_status.txt" 2>/dev/null || echo "UNKNOWN")
+                [ "$QG_STATUS" = "OK" ] && QG_ICON="✅ Passed" || QG_ICON="❌ Failed"
+
+                echo "<details><summary>${QG_ICON} — <code>${PROJECT_KEY}</code></summary>"
+                echo ""
+                echo "[View in SonarCloud](${SONAR_URL}/project/overview?id=${PROJECT_KEY})"
+                echo ""
+
+                FAILED_CONDS=$(jq -r '
+                  .projectStatus.conditions[]? |
+                  select(.status=="ERROR") |
+                  "| \(.metricKey | gsub("_";" ") | ascii_upcase) | \(.actualValue) | \(.comparator) \(.errorThreshold) |"
+                ' "$D/qg.json" 2>/dev/null || true)
 
               if [ -n "$FAILED_CONDS" ]; then
                 echo "<details open><summary>❌ Failed Quality Gate Conditions</summary>"
@@ -852,7 +1030,7 @@ jobs:
               SEV_FACET=$(jq -r '
                 (.facets // [])[] | select(.property=="severities") |
                 .values[] | "| \(.val) | \(.count) |"
-              ' ./sonar-data/issues.json 2>/dev/null || true)
+              ' "$D/issues.json" 2>/dev/null || true)
               if [ -n "$SEV_FACET" ]; then
                 echo "<details><summary>📊 Issue Severity Breakdown</summary>"
                 echo ""
@@ -864,8 +1042,8 @@ jobs:
                 echo ""
               fi
 
-              IC=$(jq '.issues | length' ./sonar-data/issues.json 2>/dev/null || echo 0)
-              IT=$(jq '.total // 0'     ./sonar-data/issues.json 2>/dev/null || echo 0)
+              IC=$(jq '.issues | length' "$D/issues.json" 2>/dev/null || echo 0)
+              IT=$(jq '.total // 0'     "$D/issues.json" 2>/dev/null || echo 0)
               REPO_URL="${SERVER_URL}/${REPO}"
               if [ "${IC:-0}" -eq 0 ] && [ "$QG_STATUS" != "OK" ]; then
                 echo "> No individual issues were returned from the API. The Quality Gate may have failed due to metric thresholds (e.g. coverage, ratings). Check the [SonarCloud dashboard](${SONAR_URL}/project/issues?id=${PROJECT_KEY}) for details."
@@ -887,15 +1065,15 @@ jobs:
                   else
                     "| \(.severity) | \(.type | gsub("_";" ")) | \($m) | `\($f)` | \($e) |"
                   end
-                ' ./sonar-data/issues.json 2>/dev/null | head -15
+                ' "$D/issues.json" 2>/dev/null | head -15
                 echo ""
                 [ "${IT:-0}" -gt 15 ] && echo "_...and $((IT-15)) more. [View all in SonarCloud](${SONAR_URL}/project/issues?id=${PROJECT_KEY})._" && echo ""
                 echo "</details>"
                 echo ""
               fi
 
-              HC=$(jq '.hotspots | length'  ./sonar-data/hotspots.json 2>/dev/null || echo 0)
-              HT=$(jq '.paging.total // 0'  ./sonar-data/hotspots.json 2>/dev/null || echo 0)
+              HC=$(jq '.hotspots | length'  "$D/hotspots.json" 2>/dev/null || echo 0)
+              HT=$(jq '.paging.total // 0'  "$D/hotspots.json" 2>/dev/null || echo 0)
               if [ "${HC:-0}" -gt 0 ]; then
                 echo "<details><summary>🔥 Security Hotspots Requiring Review (${HT} total)</summary>"
                 echo ""
@@ -911,12 +1089,16 @@ jobs:
                   else
                     "| \(.vulnerabilityProbability) | \(.securityCategory | gsub("-";" ") | ascii_upcase) | \($m) | `\($f)` |"
                   end
-                ' ./sonar-data/hotspots.json 2>/dev/null | head -10
+                ' "$D/hotspots.json" 2>/dev/null | head -10
                 echo ""
                 [ "${HT:-0}" -gt 10 ] && echo "_...and $((HT-10)) more. [Review all hotspots](${SONAR_URL}/project/security_hotspots?id=${PROJECT_KEY})._" && echo ""
                 echo "</details>"
                 echo ""
               fi
+
+                echo "</details>"
+                echo ""
+              done <<< "$(printf '%s' "${SONAR_PROJECTS:-[]}" | jq -r '.[].key' 2>/dev/null)"
             fi
 
             echo ""
@@ -1036,18 +1218,20 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # ── Step 6: Docker Best Practices section ───────────────────────────────
+      # ── Step 6: Docker Best Practices section (per target) ──────────────────
+      # Loops over every Docker target resolved by `plan`. Lint-only runs list
+      # each Dockerfile; build+scan runs render one collapsible block per image.
       - name: Report — Docker Best Practices
         if: always()
         shell: bash
         env:
-          RESULT_DOCKER:    ${{ needs.docker-lint.result }}
-          DOCKERFILE_FOUND: ${{ needs.detect-dockerfile.outputs.found }}
-          DOCKERFILE_PATH:  ${{ needs.detect-dockerfile.outputs.path }}
-          DOCKER_BUILD:     ${{ inputs.docker-build-image }}
+          RESULT_DOCKER:  ${{ needs.docker-lint.result }}
+          DOCKER_TARGETS: ${{ needs.plan.outputs.docker-targets }}
+          DOCKER_COUNT:   ${{ needs.plan.outputs.docker-count }}
+          DOCKER_BUILD:   ${{ inputs.docker-build-image }}
+          DIVE_MIN:       ${{ inputs.docker-dive-min-efficiency }}
         run: |
           set -uo pipefail
-          DK_FILE="./reports/docker/docker-vuln-report.json"
 
           status_icon() {
             case "$1" in
@@ -1063,60 +1247,64 @@ jobs:
             echo "### 🐳 Docker Best Practices"
             echo ""
 
-            if [ "$RESULT_DOCKER" = "skipped" ] || [ "${DOCKERFILE_FOUND:-false}" != "true" ]; then
+            if [ "$RESULT_DOCKER" = "skipped" ] || [ "${DOCKER_COUNT:-0}" -eq 0 ]; then
               echo "⏭️ _Skipped — no Dockerfile detected in this repository_"
               echo ""
               echo "> To enable the Docker pipeline, add a \`Dockerfile\` at the repo root or in"
-              echo "> any subdirectory (e.g. \`apps/api/Dockerfile\`), or set \`dockerfile:\` in your"
-              echo "> CI caller to an explicit path."
+              echo "> any subdirectory (e.g. \`apps/api/Dockerfile\`), set \`dockerfile:\`, or pass a"
+              echo "> \`docker-targets\` list in your CI caller."
             elif [ "${DOCKER_BUILD:-false}" != "true" ]; then
-              echo "**Status: $(status_icon "$RESULT_DOCKER") — Dockerfile lint only**"
+              echo "**Status: $(status_icon "$RESULT_DOCKER") — Dockerfile lint only (${DOCKER_COUNT} image(s))**"
               echo ""
-              echo "> Hadolint + Checkov ran against the Dockerfile. Image build, CVE scan,"
+              echo "> Hadolint + Checkov ran against each Dockerfile. Image build, CVE scan,"
               echo "> container SBOM, and Dive efficiency are deferred to the CD pipeline"
               echo "> (\`docker-build-image\` is disabled in this CI orchestrator)."
               echo ""
-              [ -n "${DOCKERFILE_PATH:-}" ] && echo "> Dockerfile: \`${DOCKERFILE_PATH}\`"
-            elif [ ! -f "$DK_FILE" ]; then
-              echo "$(status_icon "$RESULT_DOCKER") _(vulnerability report artifact not available)_"
-              echo ""
-              [ -n "${DOCKERFILE_PATH:-}" ] && echo "> Dockerfile scanned: \`${DOCKERFILE_PATH}\`"
+              printf '%s' "${DOCKER_TARGETS:-[]}" | jq -r '.[] | "> - `\(.dockerfile)`"' 2>/dev/null || true
             else
-              IMAGE=$(jq -r '.meta.image // "unknown"'              "$DK_FILE" 2>/dev/null || echo "unknown")
-              SHA=$(jq -r   '.meta.sha   // "unknown"'              "$DK_FILE" 2>/dev/null || echo "unknown")
-              SEV=$(jq -r   '.meta.severity_filter // "CRITICAL,HIGH"' "$DK_FILE" 2>/dev/null || echo "CRITICAL,HIGH")
-              VULN_COUNT=$(jq '.meta.vulnerability_count // 0'      "$DK_FILE" 2>/dev/null || echo "0")
-
-              if [ "$VULN_COUNT" -eq 0 ]; then
-                echo "**Status: ✅ No vulnerabilities at ${SEV}**"
+              DK_FILES=$(find ./reports/docker -name 'docker-vuln-report.json' 2>/dev/null | sort || true)
+              if [ -z "${DK_FILES}" ]; then
+                echo "$(status_icon "$RESULT_DOCKER") _(no vulnerability report artifacts available)_"
               else
-                echo "**Status: ❌ ${VULN_COUNT} vulnerability/vulnerabilities at ${SEV}**"
-              fi
-              echo ""
-              echo "> Dockerfile: \`${DOCKERFILE_PATH}\` | Image: \`${IMAGE}\` | Commit: \`${SHA:0:7}\`"
-              echo ""
+                GRAND_TOTAL=0
+                while IFS= read -r DK_FILE; do
+                  [ -z "$DK_FILE" ] && continue
+                  IMAGE=$(jq -r '.meta.image // "unknown"'                 "$DK_FILE" 2>/dev/null || echo "unknown")
+                  DSHA=$(jq -r  '.meta.sha   // "unknown"'                 "$DK_FILE" 2>/dev/null || echo "unknown")
+                  SEV=$(jq -r   '.meta.severity_filter // "CRITICAL,HIGH"' "$DK_FILE" 2>/dev/null || echo "CRITICAL,HIGH")
+                  VULN_COUNT=$(jq '.meta.vulnerability_count // 0'         "$DK_FILE" 2>/dev/null || echo "0")
+                  GRAND_TOTAL=$((GRAND_TOTAL + VULN_COUNT))
+                  [ "$VULN_COUNT" -eq 0 ] && ST_ICON="✅" || ST_ICON="❌"
 
-              if [ "$VULN_COUNT" -gt 0 ]; then
-                echo "#### Top Vulnerabilities"
-                echo ""
-                echo "| Severity | Package | CVE | Title |"
-                echo "|----------|---------|-----|-------|"
-                jq -r '
-                  .results[]? | .Target as $t |
-                  .Vulnerabilities[]? |
-                  ( .Severity // "UNKNOWN" ) as $sev |
-                  ( .VulnerabilityID // "—" ) as $cve |
-                  ( .PkgName // "unknown" ) as $pkg |
-                  ( .Title // .Description // "—" | gsub("[|]";"\\|") | .[0:80] ) as $title |
-                  "| \($sev) | `\($pkg)` | `\($cve)` | \($title) |"
-                ' "$DK_FILE" 2>/dev/null \
-                  | sort -t'|' -k2 \
-                  | head -20
-                TOTAL=$(jq '[.results[]?.Vulnerabilities // [] | length] | add // 0' "$DK_FILE" 2>/dev/null || echo 0)
-                [ "${TOTAL:-0}" -gt 20 ] && echo "" && echo "_...and $((TOTAL-20)) more. Download the \`docker-vuln-report\` artifact for the full list._"
-                echo ""
-                echo "> **Remediation:** Update the base image to a patched version, or pin specific"
-                echo "> package versions and rebuild. Review the GitHub Security tab for SARIF findings."
+                  echo "<details><summary>${ST_ICON} <code>${IMAGE}</code> — ${VULN_COUNT} vuln(s) at ${SEV}</summary>"
+                  echo ""
+                  echo "> Image: \`${IMAGE}\` | Commit: \`${DSHA:0:7}\`"
+                  echo ""
+                  if [ "$VULN_COUNT" -gt 0 ]; then
+                    echo "| Severity | Package | CVE | Title |"
+                    echo "|----------|---------|-----|-------|"
+                    jq -r '
+                      .results[]? | .Target as $t |
+                      .Vulnerabilities[]? |
+                      ( .Severity // "UNKNOWN" ) as $sev |
+                      ( .VulnerabilityID // "—" ) as $cve |
+                      ( .PkgName // "unknown" ) as $pkg |
+                      ( .Title // .Description // "—" | gsub("[|]";"\\|") | .[0:80] ) as $title |
+                      "| \($sev) | `\($pkg)` | `\($cve)` | \($title) |"
+                    ' "$DK_FILE" 2>/dev/null | sort -t'|' -k2 | head -20
+                    TOTAL=$(jq '[.results[]?.Vulnerabilities // [] | length] | add // 0' "$DK_FILE" 2>/dev/null || echo 0)
+                    [ "${TOTAL:-0}" -gt 20 ] && echo "" && echo "_...and $((TOTAL-20)) more. Download the \`docker-vuln-report*\` artifacts for the full list._"
+                  fi
+                  echo ""
+                  echo "</details>"
+                  echo ""
+                done <<< "${DK_FILES}"
+
+                if [ "${GRAND_TOTAL:-0}" -gt 0 ]; then
+                  echo "> **Remediation:** Update base images to patched versions, or pin specific"
+                  echo "> package versions and rebuild. Review the GitHub Security tab for SARIF findings."
+                  echo ""
+                fi
               fi
 
               echo "<details><summary>📋 Docker pipeline sub-checks</summary>"
@@ -1127,7 +1315,7 @@ jobs:
               echo "| IaC Security | Checkov | Misconfigurations (root user, no HEALTHCHECK, :latest tag) |"
               echo "| CVE Scan | Trivy | OS + language package vulnerabilities, secrets, misconfigs |"
               echo "| Container SBOM | Syft | SPDX JSON + CycloneDX JSON for the built image |"
-              echo "| Efficiency | Dive | Layer efficiency score (threshold: \`${{ inputs.docker-dive-min-efficiency }}\`) |"
+              echo "| Efficiency | Dive | Layer efficiency score (threshold: \`${DIVE_MIN}\`) |"
               echo ""
               echo "</details>"
             fi

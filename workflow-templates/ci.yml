@@ -7,6 +7,7 @@ name: Orion CI
 # ── Setup checklist ──────────────────────────────────────────────────────────
 # 1. Set `release-type` to match your project (or remove it to skip releases).
 # 2. Set `sonar-project-key` to your SonarCloud project key (or remove to skip).
+#    Monorepo? Use `sonar-projects` (a JSON array) instead — see the SonarCloud block below.
 # 3. Org secrets — SonarCloud: two tokens — SONAR_TOKEN (scan); SONAR_ISSUE_RETRIEVAL (CI Report / APIs).
 # 4. Set one of python-version / node-version / java-version if needed.
 # 5. Coverage: this template is one job — see org README for coverage + Sonar caveats.
@@ -41,9 +42,20 @@ jobs:
       # release-manifest: true
 
       # ── SonarCloud ──────────────────────────────────────────────────────
-      # Format: orion-digital-solutions_<repository-name>
+      # SINGLE project: set the key (orion-digital-solutions_<repository-name>).
       # Remove this line to skip SonarCloud.
       sonar-project-key: orion-digital-solutions_${{ github.event.repository.name }}
+      #
+      # MONOREPO (multiple SonarCloud projects in one repo): remove
+      # sonar-project-key above and use sonar-projects instead — a JSON array,
+      # one object per sub-project (each its own SonarCloud project + Quality
+      # Gate + PR check). Create each project in SonarCloud first ("Add new
+      # project" under the monorepo binding). A PR touching several sub-projects
+      # gets a separate, project-labelled gate check for each. Example:
+      # sonar-projects: >-
+      #   [{"key":"orion-digital-solutions_myrepo-web","sources":"apps/web","node-version":"20","js-coverage-report":"apps/web/coverage/lcov.info","coverage-artifact":"web-cov"},
+      #    {"key":"orion-digital-solutions_myrepo-api","sources":"apps/api","node-version":"20","js-coverage-report":"apps/api/coverage/lcov.info","coverage-artifact":"api-cov"},
+      #    {"key":"orion-digital-solutions_myrepo-py","sources":"services/py","python-version":"3.12","python-coverage-report":"services/py/coverage.xml","coverage-artifact":"py-cov"}]
 
       # ── Runtime (uncomment what your project needs) ──────────────────────
       # python-version: "3.11"
@@ -76,22 +88,31 @@ jobs:
       # sonar-extra-args: "-Dsonar.go.coverage.reportPaths=cov.out"
 
       # ── Docker best-practices pipeline ──────────────────────────────────
-      # Auto-detects any Dockerfile at the repo root — no config required.
-      # By default CI only LINTS the Dockerfile (Hadolint + Checkov). The image
+      # Auto-detects ALL Dockerfiles in the repo (root or any subdirectory) and
+      # lints each — no config required. Non-production paths (examples, test,
+      # tests, fixtures, docs, node_modules, vendor) are excluded automatically.
+      # By default CI only LINTS each Dockerfile (Hadolint + Checkov). The image
       # is built and CVE-scanned in your CD pipeline. Set docker-build-image: true
-      # only if you want CI to also build + scan + SBOM + Dive the image.
+      # only if you want CI to also build + scan + SBOM + Dive the image(s).
       #
       # docker-build-image: false          # true = CI builds & scans the image too
       #
       # Uncomment and adjust the options below only if you need to override
-      # the defaults or point to a non-standard Dockerfile location.
+      # the defaults, exclude paths, or pin specific Dockerfiles.
       #
-      # dockerfile: "Dockerfile"           # explicit path (leave blank to auto-detect)
+      # dockerfile: "Dockerfile"           # pin ONE explicit path (disables auto-detect)
+      # docker-exclude: "samples/*, **/*.dev"   # extra globs to skip during auto-detect
       # docker-image-name: "myapp:ci"      # image tag used during CI (never pushed)
       # docker-trivy-severity: "CRITICAL,HIGH"
       # docker-dive-enable: true
       # docker-dive-min-efficiency: 0.9    # fail if layer efficiency < 90%
       # docker-grype-enable: false         # set true to add Grype as a second CVE scanner
+      #
+      # MONOREPO — pin an explicit set of Dockerfiles (full control; disables
+      # auto-detect). JSON array, one object per image:
+      # docker-targets: >-
+      #   [{"dockerfile":"apps/web/Dockerfile","context":"apps/web"},
+      #    {"dockerfile":"apps/api/Dockerfile","context":"apps/api"}]
 
       # ── Advanced (rarely need changing) ─────────────────────────────────
       # main-branch: "main"

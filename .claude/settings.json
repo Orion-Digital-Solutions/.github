@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.sonarsource.com)",
+      "WebFetch(domain:www.sonarsource.com)",
+      "Bash(git -C \"d:/Internal/helpers/Tools/.github\" checkout -b feat/ci-monorepo-sonar-docker)",
+      "Bash(python -m pip install --quiet --user pyyaml)",
+      "Bash(python -c ' *)",
+      "Bash(command -v docker)",
+      "Bash(echo \"docker: $\\(command -v docker || echo no\\)\")",
+      "Bash(command -v go)",
+      "Bash(echo \"go: $\\(command -v go || echo no\\)\")",
+      "Bash(MSYS_NO_PATHCONV=1 docker run --rm -v \"D:/Internal/helpers/Tools/.github\":/repo -w /repo rhysd/actionlint:latest .github/workflows/ci.yml .github/workflows/docker-lint.yml)",
+      "Bash(python -c \"import yaml; yaml.safe_load\\(open\\('workflow-templates/ci.yml',encoding='utf-8'\\)\\); print\\('workflow-templates/ci.yml: OK'\\)\")"
+    ]
+  }
+}
