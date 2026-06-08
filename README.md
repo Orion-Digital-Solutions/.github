@@ -188,13 +188,14 @@ The orchestrator is the **recommended way** to adopt CI. One file in your repo c
 The orchestrator runs checks in parallel where possible, then gates release automation on their results:
 
 ```
-Phase 1 (parallel — sonar skips if no project key; license skips on release):
-  ┌─ secret-scan ──────────────────────┐
-  ├─ sonarcloud  ──────────────────────┤
+Phase 1 (parallel — sonar/docker skip if nothing resolved; license skips on release):
+  ┌─ plan ─────────────────────────────►  (always; normalises scalar OR list inputs into
+  │                                         sonar-projects[] + docker-targets[] + counts)
+  ├─ secret-scan ──────────────────────┤
+  ├─ sonarcloud  (matrix over plan's sonar-projects — one leg per project; skip if count 0)
   ├─ license-check ────────────────────┤
-  ├─ detect-dockerfile ───────────────►  (always; finds Dockerfile or skips Docker pipeline)
-  └─ docker-lint ─────────────────────►  only if a Dockerfile was found (Hadolint, Checkov,
-                                          Trivy, optional Grype, Syft, Dive)
+  └─ docker-lint (matrix over plan's docker-targets — one leg per Dockerfile; skip if count 0;
+                  Hadolint, Checkov, then Trivy/Grype/Syft/Dive when docker-build-image: true)
 
 Phase 2 — push to main (or release for SBOM attach):
   ├─ release-please   (needs secret-scan, sonarcloud, license-check, docker-lint — all must
@@ -218,10 +219,20 @@ Phase 1 wall-clock time is driven by the slowest of the scans plus Docker (when 
 ```yaml
 uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
 with:
-  # ── SonarCloud ─────────────────────────────────────────────────────────
-  sonar-project-key: ""              # Required for SonarCloud scan.
+  # ── SonarCloud (single project) ────────────────────────────────────────
+  sonar-project-key: ""              # Single-project scan.
                                      # Format: orion-digital-solutions_<repo-name>
-                                     # Leave blank to skip the scan.
+                                     # Leave blank to skip, or when using sonar-projects.
+  sonar-sources: "."                 # Directory to analyse for the single-project path.
+
+  # ── SonarCloud (monorepo) ──────────────────────────────────────────────
+  # Mutually exclusive with sonar-project-key. JSON array, one object per
+  # sub-project — each its own SonarCloud project, Quality Gate, and PR check.
+  # A PR touching several sub-projects posts a separate gate check per project.
+  # Per-element keys: key (required), sources, project-name, node-version,
+  # python-version, java-version, js-coverage-report, python-coverage-report,
+  # coverage-artifact, sonar-extra-args.
+  sonar-projects: ""                 # e.g. '[{"key":"...","sources":"apps/web", ...}, ...]'
 
   sonar-python-coverage-report: ""   # Path to pytest XML coverage report.
                                      # e.g. "coverage.xml"
@@ -258,16 +269,62 @@ with:
   # ── Runner ─────────────────────────────────────────────────────────────
   runner: "ubuntu-latest"            # GitHub-hosted runner label for all orchestrator jobs.
 
-  # ── Docker (optional; auto-detected) ───────────────────────────────────
-  dockerfile: ""                     # Explicit Dockerfile path (e.g. apps/api/Dockerfile); blank = auto-detect (root or subfolder)
-  docker-context: ""                 # Build context; blank = detected Dockerfile's directory ("." for a root Dockerfile)
-  docker-image-name: ""              # CI image tag (default: orion-docker-check:ci)
+  # ── Docker (optional; auto-detects ALL Dockerfiles) ────────────────────
+  # By default every Dockerfile in the repo is linted (one matrix leg each),
+  # excluding non-production paths (examples, test, tests, fixtures, docs,
+  # node_modules, vendor). Use the controls below to pin or prune targets.
+  dockerfile: ""                     # Pin ONE explicit Dockerfile path (disables auto-detect)
+  docker-targets: ""                 # Monorepo: explicit JSON array of {dockerfile, context?, image-name?}
+                                     # (mutually exclusive with dockerfile; disables auto-detect)
+  docker-exclude: ""                 # Extra path globs to skip during auto-detect (comma/space-separated)
+  docker-context: ""                 # Build context for the single `dockerfile` path
+  docker-image-name: ""              # CI image tag (default: per-target orion-docker-check-<id>:ci)
   docker-trivy-severity: "CRITICAL,HIGH"
   docker-trivy-ignore-unfixed: false  # true = ignore CVEs with no upstream fix yet
   docker-dive-enable: true
   docker-dive-min-efficiency: 0.9    # Dive layer efficiency threshold (0.0–1.0)
   docker-grype-enable: false         # optional second CVE scanner alongside Trivy
 ```
+
+---
+
+### Monorepo support (multiple Sonar projects / Dockerfiles)
+
+The orchestrator handles a single-project repo and a monorepo with the **same**
+`ci.yml` — a single project is just a length-1 list. Pass the list inputs instead
+of the scalars:
+
+- **SonarCloud:** `sonar-projects` — a JSON array, one object per sub-project. Each
+  becomes its own SonarCloud project (own key, Quality Gate, and PR decoration), so a
+  PR touching several sub-projects posts a **separate, project-labelled gate check for
+  each**, scoped to that project's `sources`. Create each project in SonarCloud first
+  via **Add new project** under the monorepo binding, using unique keys
+  (`orion-digital-solutions_<repo>-<component>`).
+- **Docker:** by default **all** Dockerfiles are auto-detected and linted (one matrix
+  leg each), minus the built-in non-production excludes and any `docker-exclude` globs.
+  Pass `docker-targets` to pin an explicit set instead.
+
+```yaml
+with:
+  sonar-projects: >-
+    [{"key":"orion-digital-solutions_myrepo-web","sources":"apps/web","node-version":"20","js-coverage-report":"apps/web/coverage/lcov.info","coverage-artifact":"web-cov"},
+     {"key":"orion-digital-solutions_myrepo-api","sources":"apps/api","node-version":"20","js-coverage-report":"apps/api/coverage/lcov.info","coverage-artifact":"api-cov"},
+     {"key":"orion-digital-solutions_myrepo-py","sources":"services/py","python-version":"3.12","python-coverage-report":"services/py/coverage.xml","coverage-artifact":"py-cov"}]
+  docker-targets: >-
+    [{"dockerfile":"apps/web/Dockerfile","context":"apps/web"},
+     {"dockerfile":"apps/api/Dockerfile","context":"apps/api"}]
+secrets: inherit
+```
+
+**Rules:** the scalar (`sonar-project-key` / `dockerfile`) and its list counterpart
+(`sonar-projects` / `docker-targets`) are mutually exclusive — passing both fails the
+`plan` job with a clear error. Coverage and per-language runtime are set **per element**
+in `sonar-projects` (not via the top-level `sonar-*-coverage-report` / `*-version`
+inputs, which serve the single-project path).
+
+**Enforcement:** SonarCloud does not offer its own merge-block for monorepo projects.
+Enforce gates via **GitHub branch protection → required status checks**, marking each
+project's check (e.g. `SonarCloud (…-web)`, `SonarCloud (…-api)`) as required.
 
 ---
 
@@ -281,7 +338,7 @@ with:
 | `release` created | ✅ delta | ✅ (if project key set) | — (skipped) | ✅ if Dockerfile found | — | ✅ (attach to release) |
 | `schedule` (weekly) | ✅ full history | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
 
-**Docker pipeline** runs only when a `Dockerfile` exists — at the repo root or in any subdirectory (e.g. `apps/api/Dockerfile`, also matches `Dockerfile.*` variants) — or when you set `dockerfile` to a valid path. Detection prefers a root `Dockerfile`, then picks the shallowest match found in subdirectories (`node_modules`, `.git`, and `vendor` are excluded); the build context defaults to that Dockerfile's directory. If there is no Dockerfile, the Docker job is **skipped** and does not block Release Please.
+**Docker pipeline** lints **every** `Dockerfile` in the repo — at the root or any subdirectory (e.g. `apps/api/Dockerfile`, also matches `Dockerfile.*` variants), one matrix leg per file. Non-production paths (`examples`, `test`, `tests`, `fixtures`, `docs`, `node_modules`, `vendor`) are excluded, plus any `docker-exclude` globs; each leg's build context defaults to its Dockerfile's directory. Pin a single file with `dockerfile`, or an explicit set with `docker-targets` (either disables auto-detect). If no Dockerfile is found, the Docker job is **skipped** and does not block Release Please.
 
 **Delta scanning** means only changed commits are scanned for secrets on non-schedule events (including `release` triggers, which behave like a push for Gitleaks). SonarCloud still runs a full analysis of the repository on each trigger; Quality Gate and PR decoration focus on **new code** relative to your SonarCloud new-code definition. License compliance runs on the current dependency tree (Trivy) whenever that job is enabled — it is **skipped** on `release` events only. SBOM may run on `release` and attach to the release assets; Release Please may also attach SBOMs when a release is created (see [SBOM on releases (two paths)](#sbom-on-releases-two-paths) below).
 
@@ -422,7 +479,7 @@ The report opens with a **Pipeline Dashboard** — a single at-a-glance table sh
 
 ### SonarCloud Detail
 
-The detailed SonarCloud blocks in the Summary are built with **`SONAR_ISSUE_RETRIEVAL`** (not `SONAR_TOKEN`). The report job issues four Web API calls:
+The detailed SonarCloud blocks in the Summary are built with **`SONAR_ISSUE_RETRIEVAL`** (not `SONAR_TOKEN`). The report renders **one collapsible block per project** (with an `N/M Quality Gates passed` rollup), issuing these four Web API calls for each:
 
 | API | What it provides |
 |-----|-----------------|
@@ -433,7 +490,7 @@ The detailed SonarCloud blocks in the Summary are built with **`SONAR_ISSUE_RETR
 
 All issue and hotspot entries link directly to SonarCloud so developers can click through to the full context.
 
-Artifact files (`gitleaks-report`, `license-report`, and when Docker runs, `docker-vuln-report` and related Docker artifacts) are uploaded for download and audit (**7-day** retention where set in the reusable workflows; Docker image tar artifacts may use shorter retention — see `docker-lint.yml`).
+Artifact files (`gitleaks-report`, `license-report`, and when Docker builds/scans, one `docker-vuln-report*` per image plus related Docker artifacts) are uploaded for download and audit (**7-day** retention where set in the reusable workflows; Docker image tar artifacts may use shorter retention — see `docker-lint.yml`).
 
 ### SBOM on releases (two paths)
 

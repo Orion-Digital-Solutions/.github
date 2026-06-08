@@ -72,6 +72,20 @@ on:
         type: string
         default: "orion-docker-check:ci"
 
+      # ── Monorepo target discriminator ──────────────────────────────────────
+      # When this workflow is fanned out across MULTIPLE Dockerfiles in the same
+      # run (a monorepo matrix in the CI orchestrator), each leg must produce
+      # uniquely-named artifacts and SARIF categories — otherwise legs clobber
+      # each other's image/vuln/SBOM artifacts and Security-tab results for the
+      # same commit. Pass a stable per-target slug (e.g. "apps-api-Dockerfile").
+      # Leave blank (the default) for a single-Dockerfile repo: every artifact
+      # name and SARIF category is then byte-for-byte identical to before.
+      target-id:
+        description: "Per-target slug appended to artifact names and SARIF categories when fanning out across multiple Dockerfiles. Leave blank for single-Dockerfile repos."
+        required: false
+        type: string
+        default: ""
+
       build-args:
         description: "Newline-separated Docker build arguments (KEY=VALUE), passed as --build-arg"
         required: false
@@ -284,7 +298,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: hadolint.sarif
-          category:   hadolint-dockerfile
+          category:   hadolint-dockerfile${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
       # ── Checkov ────────────────────────────────────────────────────────────
       # IaC security scanner — Dockerfile-specific checks include:
@@ -311,7 +325,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: checkov-results/results_sarif.sarif
-          category:   checkov-dockerfile
+          category:   checkov-dockerfile${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
       # ── Fail if any linting check failed ──────────────────────────────────
       - name: Fail if lint checks failed
@@ -435,7 +449,7 @@ jobs:
       - name: Upload image artifact
         uses: actions/upload-artifact@v7
         with:
-          name:              docker-image-${{ github.sha }}
+          name:              docker-image-${{ github.sha }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
           path:              docker-image.tar.gz
           retention-days:    1      # ephemeral — only needed within this workflow run
           if-no-files-found: error
@@ -453,7 +467,7 @@ jobs:
       - name: Download image artifact
         uses: actions/download-artifact@v7
         with:
-          name: docker-image-${{ github.sha }}
+          name: docker-image-${{ github.sha }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
       - name: Load Docker image
         shell: bash
@@ -532,7 +546,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy.sarif
-          category:   trivy-container
+          category:   trivy-container${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
       # ── Grype — optional second scanner (SBOM-aware) ──────────────────────
       # Grype excels at scanning against SBOMs and can catch CVEs that Trivy
@@ -554,7 +568,7 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
-          category:   grype-container
+          category:   grype-container${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
       # ── Enrich and persist vulnerability report ────────────────────────────
       - name: Enrich vulnerability report
@@ -590,7 +604,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name:              docker-vuln-report
+          name:              docker-vuln-report${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
           path:              docker-vuln-report.json
           retention-days:    ${{ inputs.artifact-retention-days }}
           if-no-files-found: warn
@@ -620,7 +634,7 @@ jobs:
       - name: Download image artifact
         uses: actions/download-artifact@v7
         with:
-          name: docker-image-${{ github.sha }}
+          name: docker-image-${{ github.sha }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
       - name: Load Docker image
         shell: bash
@@ -636,9 +650,9 @@ jobs:
         with:
           image:                 ${{ needs.build.outputs.image-name }}
           format:                spdx-json
-          output-file:           ${{ inputs.sbom-artifact-name }}.spdx.json
+          output-file:           ${{ inputs.sbom-artifact-name }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}.spdx.json
           upload-artifact:       true
-          artifact-name:         ${{ inputs.sbom-artifact-name }}-spdx.json
+          artifact-name:         ${{ inputs.sbom-artifact-name }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}-spdx.json
           upload-release-assets: ${{ inputs.sbom-attach-to-release && github.event_name == 'release' }}
 
       # ── CycloneDX JSON SBOM ───────────────────────────────────────────────
@@ -647,9 +661,9 @@ jobs:
         with:
           image:                 ${{ needs.build.outputs.image-name }}
           format:                cyclonedx-json
-          output-file:           ${{ inputs.sbom-artifact-name }}.cyclonedx.json
+          output-file:           ${{ inputs.sbom-artifact-name }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}.cyclonedx.json
           upload-artifact:       true
-          artifact-name:         ${{ inputs.sbom-artifact-name }}-cyclonedx.json
+          artifact-name:         ${{ inputs.sbom-artifact-name }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}-cyclonedx.json
           upload-release-assets: ${{ inputs.sbom-attach-to-release && github.event_name == 'release' }}
 
       # ── Optional signed SBOM attestation (Sigstore) ───────────────────────
@@ -672,13 +686,13 @@ jobs:
         with:
           subject-name:   ${{ needs.build.outputs.image-name }}
           subject-digest: ${{ steps.image-digest.outputs.digest }}
-          sbom-path:      ${{ inputs.sbom-artifact-name }}.spdx.json
+          sbom-path:      ${{ inputs.sbom-artifact-name }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}.spdx.json
 
       # ── Job summary ────────────────────────────────────────────────────────
       - name: Container SBOM summary
         shell: bash
         env:
-          ARTIFACT_NAME: ${{ inputs.sbom-artifact-name }}
+          ARTIFACT_NAME: ${{ inputs.sbom-artifact-name }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
           IMAGE_NAME:    ${{ needs.build.outputs.image-name }}
           EVENT_NAME:    ${{ github.event_name }}
           ATTACH:        ${{ inputs.sbom-attach-to-release }}
@@ -709,7 +723,7 @@ jobs:
       - name: Download image artifact
         uses: actions/download-artifact@v7
         with:
-          name: docker-image-${{ github.sha }}
+          name: docker-image-${{ github.sha }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
       - name: Load Docker image
         shell: bash
