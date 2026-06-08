@@ -293,8 +293,13 @@ jobs:
           output-file: hadolint.sarif
           no-fail:     false
 
+      # SARIF upload is supplementary enrichment for the Security tab — it must
+      # NEVER fail the lint leg (concurrent uploads for the same commit across
+      # matrix legs can 409). The lint verdict comes from the tool outcomes via
+      # the "Fail if lint checks failed" step below.
       - name: Upload Hadolint SARIF
         if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: hadolint.sarif
@@ -322,10 +327,50 @@ jobs:
 
       - name: Upload Checkov SARIF
         if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: checkov-results/results_sarif.sarif
           category:   checkov-dockerfile${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
+
+      # ── Capture lint findings for the CI Report ────────────────────────────
+      # Distil the Hadolint + Checkov SARIF into a small per-target JSON so the
+      # orchestrator's report can show EXACTLY which checks failed (not just
+      # "Failed"), in both lint-only and build modes. Runs even when a check
+      # failed (the tool steps are continue-on-error) and never fails the leg.
+      - name: Summarise lint findings
+        if: always()
+        shell: bash
+        env:
+          TARGET_ID:        ${{ inputs.target-id }}
+          DOCKERFILE:       ${{ inputs.dockerfile }}
+          HADOLINT_OUTCOME: ${{ steps.hadolint.outcome }}
+          CHECKOV_OUTCOME:  ${{ steps.checkov.outcome }}
+        run: |
+          set -uo pipefail
+          HL='[]'; CK='[]'
+          if [ -f hadolint.sarif ]; then
+            HL=$(jq -c '[ .runs[0].results[]? | {id: .ruleId, level: (.level // "warning"), line: (.locations[0].physicalLocation.region.startLine // 0), msg: (.message.text // "")} ]' hadolint.sarif 2>/dev/null || echo '[]')
+          fi
+          if [ -f checkov-results/results_sarif.sarif ]; then
+            CK=$(jq -c '[ .runs[0].results[]? | {id: .ruleId, line: (.locations[0].physicalLocation.region.startLine // 0), msg: (.message.text // "")} ]' checkov-results/results_sarif.sarif 2>/dev/null || echo '[]')
+          fi
+          jq -nc \
+            --arg tid "${TARGET_ID}" --arg df "${DOCKERFILE}" \
+            --arg ho "${HADOLINT_OUTCOME}" --arg co "${CHECKOV_OUTCOME}" \
+            --argjson hl "${HL}" --argjson ck "${CK}" \
+            '{target_id:$tid, dockerfile:$df, hadolint_outcome:$ho, checkov_outcome:$co, hadolint_findings:$hl, checkov_failed:$ck}' \
+            > docker-lint-result.json
+          echo "Lint result for ${DOCKERFILE}:"; cat docker-lint-result.json
+
+      - name: Upload lint findings artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name:              docker-lint-result${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
+          path:              docker-lint-result.json
+          retention-days:    ${{ inputs.artifact-retention-days }}
+          if-no-files-found: warn
 
       # ── Fail if any linting check failed ──────────────────────────────────
       - name: Fail if lint checks failed
@@ -335,7 +380,7 @@ jobs:
           FAILED_TOOLS=""
           [ "${{ steps.hadolint.outcome }}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Hadolint"
           [ "${{ steps.checkov.outcome }}"  = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Checkov"
-          echo "::error::Dockerfile lint/security check(s) failed:${FAILED_TOOLS}. Review findings in the GitHub Security tab or the job log above."
+          echo "::error::Dockerfile lint/security check(s) failed:${FAILED_TOOLS}. See the CI Report (or the GitHub Security tab) for the exact checks."
           exit 1
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -543,6 +588,7 @@ jobs:
 
       - name: Upload Trivy SARIF
         if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy.sarif
@@ -565,6 +611,7 @@ jobs:
 
       - name: Upload Grype SARIF
         if: inputs.grype-enable && !cancelled() && inputs.upload-sarif && steps.sarif-preflight.outputs.available == 'true'
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}

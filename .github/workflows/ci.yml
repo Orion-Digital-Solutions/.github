@@ -615,6 +615,16 @@ jobs:
           path: ./reports/docker
         continue-on-error: true
 
+      # One per Docker target — the distilled Hadolint + Checkov findings, so the
+      # report can show EXACTLY which checks failed (always produced when docker
+      # ran, in both lint-only and build modes).
+      - name: Download Docker lint findings
+        uses: actions/download-artifact@v7
+        with:
+          pattern: docker-lint-result*
+          path: ./reports/docker-lint
+        continue-on-error: true
+
       # ── Step 1: Fetch SonarCloud data (per project) ─────────────────────
       # Loops over every project resolved by `plan` (one for a single-project
       # repo, several for a monorepo), writing per-project data under
@@ -1253,19 +1263,63 @@ jobs:
               echo "> To enable the Docker pipeline, add a \`Dockerfile\` at the repo root or in"
               echo "> any subdirectory (e.g. \`apps/api/Dockerfile\`), set \`dockerfile:\`, or pass a"
               echo "> \`docker-targets\` list in your CI caller."
-            elif [ "${DOCKER_BUILD:-false}" != "true" ]; then
-              echo "**Status: $(status_icon "$RESULT_DOCKER") — Dockerfile lint only (${DOCKER_COUNT} image(s))**"
-              echo ""
-              echo "> Hadolint + Checkov ran against each Dockerfile. Image build, CVE scan,"
-              echo "> container SBOM, and Dive efficiency are deferred to the CD pipeline"
-              echo "> (\`docker-build-image\` is disabled in this CI orchestrator)."
-              echo ""
-              printf '%s' "${DOCKER_TARGETS:-[]}" | jq -r '.[] | "> - `\(.dockerfile)`"' 2>/dev/null || true
             else
-              DK_FILES=$(find ./reports/docker -name 'docker-vuln-report.json' 2>/dev/null | sort || true)
-              if [ -z "${DK_FILES}" ]; then
-                echo "$(status_icon "$RESULT_DOCKER") _(no vulnerability report artifacts available)_"
+              if [ "${DOCKER_BUILD:-false}" != "true" ]; then
+                echo "**Status: $(status_icon "$RESULT_DOCKER") — Dockerfile lint only (${DOCKER_COUNT} image(s))**"
               else
+                echo "**Status: $(status_icon "$RESULT_DOCKER") — lint + build/scan (${DOCKER_COUNT} image(s))**"
+              fi
+              echo ""
+
+              # ── Lint findings (always) — exact Hadolint/Checkov results per file ──
+              # Distilled by each docker-lint leg into docker-lint-result.json, so a
+              # failure shows WHICH checks failed, not just "Failed".
+              LINT_FILES=$(find ./reports/docker-lint -name 'docker-lint-result.json' 2>/dev/null | sort || true)
+              if [ -n "${LINT_FILES}" ]; then
+                while IFS= read -r LF; do
+                  [ -z "$LF" ] && continue
+                  DF=$(jq -r '.dockerfile // "Dockerfile"'      "$LF" 2>/dev/null || echo "Dockerfile")
+                  HO=$(jq -r '.hadolint_outcome // "unknown"'   "$LF" 2>/dev/null || echo "unknown")
+                  CO=$(jq -r '.checkov_outcome // "unknown"'    "$LF" 2>/dev/null || echo "unknown")
+                  HLN=$(jq '.hadolint_findings | length'        "$LF" 2>/dev/null || echo 0)
+                  CKN=$(jq '.checkov_failed | length'           "$LF" 2>/dev/null || echo 0)
+                  if [ "$HO" = "failure" ] || [ "$CO" = "failure" ]; then LICON="❌"; else LICON="✅"; fi
+
+                  echo "<details><summary>${LICON} <code>${DF}</code> — Hadolint: ${HO}, Checkov: ${CO}</summary>"
+                  echo ""
+                  if [ "${CKN:-0}" -gt 0 ]; then
+                    echo "**Failed Checkov checks (${CKN}):**"
+                    echo ""
+                    echo "| Check | Line | Message |"
+                    echo "|-------|------|---------|"
+                    jq -r '.checkov_failed[] | "| `\(.id)` | \(.line) | \(.msg | gsub("[|]";"\\|") | .[0:90]) |"' "$LF" 2>/dev/null | head -25
+                    echo ""
+                  fi
+                  if [ "${HLN:-0}" -gt 0 ]; then
+                    echo "**Hadolint findings (${HLN}):**"
+                    echo ""
+                    echo "| Rule | Level | Line | Message |"
+                    echo "|------|-------|------|---------|"
+                    jq -r '.hadolint_findings[] | "| `\(.id)` | \(.level) | \(.line) | \(.msg | gsub("[|]";"\\|") | .[0:80]) |"' "$LF" 2>/dev/null | head -25
+                    echo ""
+                  fi
+                  if [ "${CKN:-0}" -eq 0 ] && [ "${HLN:-0}" -eq 0 ]; then
+                    echo "All Hadolint and Checkov checks passed."
+                    echo ""
+                  fi
+                  echo "</details>"
+                  echo ""
+                done <<< "${LINT_FILES}"
+              else
+                echo "$(status_icon "$RESULT_DOCKER") _(lint findings artifact unavailable — open the failed Docker leg's log)_"
+                echo ""
+                printf '%s' "${DOCKER_TARGETS:-[]}" | jq -r '.[] | "> - `\(.dockerfile)`"' 2>/dev/null || true
+                echo ""
+              fi
+
+              # ── CVE findings (build mode only) — one block per scanned image ──────
+              if [ "${DOCKER_BUILD:-false}" = "true" ]; then
+                DK_FILES=$(find ./reports/docker -name 'docker-vuln-report.json' 2>/dev/null | sort || true)
                 GRAND_TOTAL=0
                 while IFS= read -r DK_FILE; do
                   [ -z "$DK_FILE" ] && continue
@@ -1276,7 +1330,7 @@ jobs:
                   GRAND_TOTAL=$((GRAND_TOTAL + VULN_COUNT))
                   [ "$VULN_COUNT" -eq 0 ] && ST_ICON="✅" || ST_ICON="❌"
 
-                  echo "<details><summary>${ST_ICON} <code>${IMAGE}</code> — ${VULN_COUNT} vuln(s) at ${SEV}</summary>"
+                  echo "<details><summary>${ST_ICON} CVEs — <code>${IMAGE}</code> — ${VULN_COUNT} at ${SEV}</summary>"
                   echo ""
                   echo "> Image: \`${IMAGE}\` | Commit: \`${DSHA:0:7}\`"
                   echo ""
