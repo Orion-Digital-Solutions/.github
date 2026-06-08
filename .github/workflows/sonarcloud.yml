@@ -46,8 +46,19 @@ on:
         default: "orion-digital-solutions"
 
       # ── Optional — Source Configuration ───────────────────────────────────
+      base-dir:
+        description: >
+          sonar.projectBaseDir for the scan. For a monorepo sub-project set its
+          path (e.g. apps/web); leave blank for a single-package repo (defaults
+          to the repo root). When set, `sources`, `exclusions`, and the coverage
+          report-path inputs are interpreted RELATIVE to this directory, and the
+          scanner reads sonar-project.properties from here (not the repo root).
+        required: false
+        type: string
+        default: ""
+
       sources:
-        description: "Comma-separated list of source directories to analyse"
+        description: "Comma-separated list of source directories to analyse (relative to base-dir when set)"
         required: false
         type: string
         default: "."
@@ -211,6 +222,12 @@ jobs:
 
           if [ -n "${{ inputs.project-name }}" ]; then
             EXTRA_ARGS+="-Dsonar.projectName='${{ inputs.project-name }}' "
+          fi
+
+          # Monorepo base dir: when set, sources/exclusions/coverage paths below are
+          # interpreted relative to it. Left unset for single-package repos (root).
+          if [ -n "${{ inputs.base-dir }}" ]; then
+            EXTRA_ARGS+="-Dsonar.projectBaseDir=${{ inputs.base-dir }} "
           fi
 
           EXTRA_ARGS+="-Dsonar.sources=${{ inputs.sources }} "

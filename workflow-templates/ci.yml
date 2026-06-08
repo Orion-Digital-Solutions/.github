@@ -51,11 +51,14 @@ jobs:
       # one object per sub-project (each its own SonarCloud project + Quality
       # Gate + PR check). Create each project in SonarCloud first ("Add new
       # project" under the monorepo binding). A PR touching several sub-projects
-      # gets a separate, project-labelled gate check for each. Example:
+      # gets a separate, project-labelled gate check for each. Set "base-dir" to
+      # each sub-project's directory so coverage paths (emitted app-relative by
+      # your test tools) resolve — sources/coverage are RELATIVE to base-dir.
+      # Without it, SonarCloud looks at the repo root and reports 0% coverage.
       # sonar-projects: >-
-      #   [{"key":"orion-digital-solutions_myrepo-web","sources":"apps/web","node-version":"20","js-coverage-report":"apps/web/coverage/lcov.info","coverage-artifact":"web-cov"},
-      #    {"key":"orion-digital-solutions_myrepo-api","sources":"apps/api","node-version":"20","js-coverage-report":"apps/api/coverage/lcov.info","coverage-artifact":"api-cov"},
-      #    {"key":"orion-digital-solutions_myrepo-py","sources":"services/py","python-version":"3.12","python-coverage-report":"services/py/coverage.xml","coverage-artifact":"py-cov"}]
+      #   [{"key":"orion-digital-solutions_myrepo-web","base-dir":"apps/web","sources":"src","node-version":"20","js-coverage-report":"coverage/lcov.info","coverage-artifact":"web-cov"},
+      #    {"key":"orion-digital-solutions_myrepo-api","base-dir":"apps/api","sources":"src","node-version":"20","js-coverage-report":"coverage/lcov.info","coverage-artifact":"api-cov"},
+      #    {"key":"orion-digital-solutions_myrepo-py","base-dir":"services/py","sources":"src","python-version":"3.12","python-coverage-report":"coverage.xml","coverage-artifact":"py-cov"}]
 
       # ── Runtime (uncomment what your project needs) ──────────────────────
       # python-version: "3.11"

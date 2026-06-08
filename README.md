@@ -229,10 +229,14 @@ with:
   # Mutually exclusive with sonar-project-key. JSON array, one object per
   # sub-project — each its own SonarCloud project, Quality Gate, and PR check.
   # A PR touching several sub-projects posts a separate gate check per project.
-  # Per-element keys: key (required), sources, project-name, node-version,
-  # python-version, java-version, js-coverage-report, python-coverage-report,
-  # coverage-artifact, sonar-extra-args.
-  sonar-projects: ""                 # e.g. '[{"key":"...","sources":"apps/web", ...}, ...]'
+  # Per-element keys: key (required), base-dir, sources, project-name,
+  # node-version, python-version, java-version, js-coverage-report,
+  # python-coverage-report, coverage-artifact, sonar-extra-args.
+  # Set base-dir to the sub-project's directory (e.g. apps/web); sources,
+  # exclusions, and coverage paths are then RELATIVE to it, so the coverage
+  # tools' app-relative report paths resolve (otherwise SonarCloud looks at the
+  # repo root and reports 0% coverage).
+  sonar-projects: ""                 # e.g. '[{"key":"...","base-dir":"apps/web","sources":"src", ...}, ...]'
 
   sonar-python-coverage-report: ""   # Path to pytest XML coverage report.
                                      # e.g. "coverage.xml"
@@ -299,7 +303,11 @@ of the scalars:
   PR touching several sub-projects posts a **separate, project-labelled gate check for
   each**, scoped to that project's `sources`. Create each project in SonarCloud first
   via **Add new project** under the monorepo binding, using unique keys
-  (`orion-digital-solutions_<repo>-<component>`).
+  (`orion-digital-solutions_<repo>-<component>`). Set each element's **`base-dir`** to
+  the sub-project's directory (e.g. `apps/web`); `sources` and the coverage report
+  paths are then **relative to it**, so the app-relative paths your test tools emit
+  resolve — without `base-dir`, SonarCloud looks at the repo root and reports **0%
+  coverage**.
 - **Docker:** by default **all** Dockerfiles are auto-detected and linted (one matrix
   leg each), minus the built-in non-production excludes and any `docker-exclude` globs.
   Pass `docker-targets` to pin an explicit set instead.
@@ -307,9 +315,9 @@ of the scalars:
 ```yaml
 with:
   sonar-projects: >-
-    [{"key":"orion-digital-solutions_myrepo-web","sources":"apps/web","node-version":"20","js-coverage-report":"apps/web/coverage/lcov.info","coverage-artifact":"web-cov"},
-     {"key":"orion-digital-solutions_myrepo-api","sources":"apps/api","node-version":"20","js-coverage-report":"apps/api/coverage/lcov.info","coverage-artifact":"api-cov"},
-     {"key":"orion-digital-solutions_myrepo-py","sources":"services/py","python-version":"3.12","python-coverage-report":"services/py/coverage.xml","coverage-artifact":"py-cov"}]
+    [{"key":"orion-digital-solutions_myrepo-web","base-dir":"apps/web","sources":"src","node-version":"20","js-coverage-report":"coverage/lcov.info","coverage-artifact":"web-cov"},
+     {"key":"orion-digital-solutions_myrepo-api","base-dir":"apps/api","sources":"src","node-version":"20","js-coverage-report":"coverage/lcov.info","coverage-artifact":"api-cov"},
+     {"key":"orion-digital-solutions_myrepo-py","base-dir":"services/py","sources":"src","python-version":"3.12","python-coverage-report":"coverage.xml","coverage-artifact":"py-cov"}]
   docker-targets: >-
     [{"dockerfile":"apps/web/Dockerfile","context":"apps/web"},
      {"dockerfile":"apps/api/Dockerfile","context":"apps/api"}]

@@ -79,12 +79,17 @@ on:
       # JSON array — one element per sub-project, each its own SonarCloud project
       # (own key, own Quality Gate, own PR decoration). Mutually exclusive with the
       # scalar sonar-project-key above. Each element:
-      #   { "key": "...", "sources": "apps/web",        # required
+      #   { "key": "...", "base-dir": "apps/web",        # required: key; base-dir for monorepo
+      #     "sources": "src",                            # relative to base-dir when set
       #     "project-name": "...",                       # optional, all below optional
       #     "node-version": "20", "python-version": "3.12", "java-version": "17",
-      #     "js-coverage-report": "apps/web/coverage/lcov.info",
-      #     "python-coverage-report": "services/py/coverage.xml",
+      #     "js-coverage-report": "coverage/lcov.info",  # relative to base-dir
+      #     "python-coverage-report": "coverage.xml",
       #     "coverage-artifact": "web-cov", "sonar-extra-args": "-Dsonar.x=y" }
+      # Set "base-dir" to the sub-project's directory so coverage report paths
+      # (which tools emit relative to that dir) resolve — otherwise SonarCloud
+      # looks for them at the repo root and reports 0% coverage. With base-dir
+      # set, sources/exclusions/coverage paths are interpreted RELATIVE to it.
       # When a PR touches more than one sub-project, every affected project is
       # scanned and posts its own project-labelled Quality Gate check.
       sonar-projects:
@@ -314,6 +319,7 @@ jobs:
     with:
       project-key:            ${{ matrix.proj.key }}
       project-name:           ${{ matrix.proj.project-name }}
+      base-dir:               ${{ matrix.proj.base-dir }}
       sources:                ${{ matrix.proj.sources }}
       python-version:         ${{ matrix.proj.python-version }}
       node-version:           ${{ matrix.proj.node-version }}
