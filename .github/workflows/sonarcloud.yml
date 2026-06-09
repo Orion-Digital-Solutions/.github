@@ -258,9 +258,15 @@ jobs:
           args: ${{ steps.sonar-props.outputs.extra_args }}
 
       # ── 5. Quality Gate Check ────────────────────────────────────────────
+      # The scanner writes report-task.txt under <projectBaseDir>/.scannerwork.
+      # For a monorepo sub-project (base-dir set) that is NOT the repo-root
+      # default the Quality Gate action assumes — point it at the right path,
+      # otherwise it fails with ".scannerwork/report-task.txt does not exist".
       - name: SonarCloud Quality Gate check
         if: inputs.fail-on-quality-gate
         uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
+        with:
+          scanMetadataReportFile: ${{ inputs.base-dir != '' && format('{0}/.scannerwork/report-task.txt', inputs.base-dir) || '.scannerwork/report-task.txt' }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
