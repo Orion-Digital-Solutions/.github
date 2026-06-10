@@ -40,7 +40,7 @@ Consumer Goods &nbsp;|&nbsp; Retail &nbsp;|&nbsp; Manufacturing &nbsp;|&nbsp; Re
 
 | Partner | Certification |
 |---|---|
-| **Oracle** | Global Alliance Partner — Oracle Management Platform (OMP) |
+| **OMP** | Global Alliance Partner — Oracle Management Platform (OMP) |
 | **Microsoft** | Gold Certified Data Analytics Solutions Partner |
 | **Blue Prism** | Silver Certified Delivery Partner — MENA Region |
 | **Databricks** | Registered Partner |
