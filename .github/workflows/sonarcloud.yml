@@ -264,7 +264,7 @@ jobs:
       # otherwise it fails with ".scannerwork/report-task.txt does not exist".
       - name: SonarCloud Quality Gate check
         if: inputs.fail-on-quality-gate
-        uses: sonarsource/sonarqube-quality-gate-action@master
+        uses: sonarsource/sonarqube-quality-gate-action@main
         timeout-minutes: 5
         with:
           scanMetadataReportFile: ${{ inputs.base-dir != '' && format('{0}/.scannerwork/report-task.txt', inputs.base-dir) || '.scannerwork/report-task.txt' }}
