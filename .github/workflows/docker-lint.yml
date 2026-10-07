@@ -425,6 +425,7 @@ jobs:
           SHA:        ${{ github.sha }}
           REF_NAME:   ${{ github.ref_name }}
           REPO_URL:   ${{ github.server_url }}/${{ github.repository }}
+          NPM_TOKEN:  ${{ secrets.AZURE_NPM_TOKEN }}
         run: |
           LABEL_FLAGS=(
             "--label" "org.opencontainers.image.source=${REPO_URL}"
@@ -441,6 +442,7 @@ jobs:
           fi
 
           docker build \
+            --secret id=npm_token,env=NPM_TOKEN \
             -f "${{ inputs.dockerfile }}" \
             -t "${IMAGE_NAME}" \
             "${LABEL_FLAGS[@]}" \
