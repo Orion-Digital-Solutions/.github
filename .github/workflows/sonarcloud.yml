@@ -163,13 +163,33 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
 
-      - name: Set up Node.js ${{ inputs.node-version }}
-        if: inputs.node-version != ''
+      # The JS/TS/CSS analyzer needs Node.js >= 22.12 (22.x), 24.x or 26.x
+      # (https://docs.sonarsource.com/sonarqube-cloud/advanced-setup/languages/javascript-typescript-css).
+      # Use the caller's node-version when given; otherwise, if the scanned dir
+      # contains JS/TS/CSS files, default to the current Node LTS.
+      - name: Resolve Node.js version for the JS/TS analyzer
+        id: node
+        shell: bash
+        env:
+          NODE_VERSION_INPUT: ${{ inputs.node-version }}
+          BASE_DIR: ${{ inputs.base-dir }}
+        run: |
+          VERSION="${NODE_VERSION_INPUT}"
+          if [ -z "${VERSION}" ] && git -C "${BASE_DIR:-.}" ls-files -- \
+              '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' '*.mts' '*.cts' \
+              '*.vue' '*.css' '*.scss' '*.sass' '*.less' | grep -q .; then
+            VERSION="lts/*"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Node.js for analysis: ${VERSION:-<none — no JS/TS/CSS detected>}"
+
+      - name: Set up Node.js ${{ steps.node.outputs.version }}
+        if: steps.node.outputs.version != ''
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ inputs.node-version }}
+          node-version: ${{ steps.node.outputs.version }}
           # This workflow never runs `npm ci`/`npm install` (the SonarCloud scanner
-          # runs in its own container; coverage is passed in via a report path), so
+          # only needs a Node runtime; coverage is passed in via a report path), so
           # dependency caching gives no benefit. setup-node v5+ AUTO-enables npm
           # caching when package.json has a `packageManager` field — that requires a
           # lockfile and would hard-fail repos without one ("Dependencies lock file is
@@ -203,14 +223,16 @@ jobs:
       - name: Resolve SonarCloud scan properties
         id: sonar-props
         shell: bash
+        env:
+          NODE_FOR_SONAR: ${{ steps.node.outputs.version }}
         run: |
           EXTRA_ARGS=""
 
           # JRE auto-provisioning is intentionally LEFT ENABLED: the scanner downloads
           # a SonarQube-Cloud-supported JRE at bootstrap, so the Java version stays
           # current automatically (Java 17 scanner support ends July 2026). Do NOT add
-          # -Dsonar.scanner.skipJreProvisioning=true — that pins the container's bundled
-          # Java 17 and re-triggers the "upgrade to Java 21" deprecation warning.
+          # -Dsonar.scanner.skipJreProvisioning=true — that falls back to the runner's
+          # default Java and can re-trigger the "upgrade to Java 21" deprecation warning.
           # NOTE: auto-provisioning calls api.sonarcloud.io; SonarCloud returns HTTP 403
           # on those calls when the project has "Automatic Analysis" enabled. Disable it
           # (Project → Administration → Analysis Method) and use CI-based analysis.
@@ -220,15 +242,15 @@ jobs:
           EXTRA_ARGS+="-Dsonar.projectKey=${{ inputs.project-key }} "
           EXTRA_ARGS+="-Dsonar.organization=${{ inputs.sonar-organization }} "
 
+          # sonarqube-scan-action splits `args` with string-argv: quotes INSIDE a token
+          # are kept literally, so wrap the whole token to allow spaces in the name.
           if [ -n "${{ inputs.project-name }}" ]; then
-            EXTRA_ARGS+="-Dsonar.projectName='${{ inputs.project-name }}' "
+            EXTRA_ARGS+="\"-Dsonar.projectName=${{ inputs.project-name }}\" "
           fi
 
-          # Monorepo base dir: when set, sources/exclusions/coverage paths below are
-          # interpreted relative to it. Left unset for single-package repos (root).
-          if [ -n "${{ inputs.base-dir }}" ]; then
-            EXTRA_ARGS+="-Dsonar.projectBaseDir=${{ inputs.base-dir }} "
-          fi
+          # Monorepo base dir (sonar.projectBaseDir) is passed via the scan action's
+          # `projectBaseDir` input (step 4) — sources/exclusions/coverage paths below
+          # are interpreted relative to it. Defaults to the repo root.
 
           EXTRA_ARGS+="-Dsonar.sources=${{ inputs.sources }} "
           EXTRA_ARGS+="-Dsonar.exclusions=${{ inputs.exclusions }} "
@@ -241,6 +263,18 @@ jobs:
             EXTRA_ARGS+="-Dsonar.javascript.lcov.reportPaths=${{ inputs.js-coverage-report }} "
           fi
 
+          # Point the JS/TS analyzer at the runner's Node explicitly when it is a
+          # supported version (>= 22.12); otherwise leave it unset so the analyzer
+          # uses its embedded Node runtime. Added before sonar-extra-args so a caller
+          # can still override it there.
+          if [ -n "${NODE_FOR_SONAR}" ] && command -v node >/dev/null 2>&1; then
+            if node -e 'const [M,m]=process.versions.node.split(".").map(Number); process.exit(M>22||(M===22&&m>=12)?0:1)'; then
+              EXTRA_ARGS+="-Dsonar.nodejs.executable=$(command -v node) "
+            else
+              echo "::warning::Node.js $(node --version) is below the analyzer minimum (22.12); using the scanner's embedded Node.js runtime instead."
+            fi
+          fi
+
           # Language-agnostic passthrough for any other coverage / scanner props.
           if [ -n "${{ inputs.sonar-extra-args }}" ]; then
             EXTRA_ARGS+="${{ inputs.sonar-extra-args }} "
@@ -249,12 +283,16 @@ jobs:
           echo "extra_args=${EXTRA_ARGS}" >> "$GITHUB_OUTPUT"
 
       # ── 4. SonarCloud Scan ───────────────────────────────────────────────
+      # sonarqube-scan-action replaces the archived, Docker-based
+      # sonarcloud-github-action. It runs the scanner directly on the runner, so
+      # the Node.js set up above is visible to the JS/TS analyzer.
       - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@v3
+        uses: SonarSource/sonarqube-scan-action@v8.5.0
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
         with:
+          projectBaseDir: ${{ inputs.base-dir != '' && inputs.base-dir || '.' }}
           args: ${{ steps.sonar-props.outputs.extra_args }}
 
       # ── 5. Quality Gate Check ────────────────────────────────────────────
@@ -264,7 +302,7 @@ jobs:
       # otherwise it fails with ".scannerwork/report-task.txt does not exist".
       - name: SonarCloud Quality Gate check
         if: inputs.fail-on-quality-gate
-        uses: sonarsource/sonarqube-quality-gate-action@master
+        uses: sonarsource/sonarqube-quality-gate-action@v1.2.1
         timeout-minutes: 5
         with:
           scanMetadataReportFile: ${{ inputs.base-dir != '' && format('{0}/.scannerwork/report-task.txt', inputs.base-dir) || '.scannerwork/report-task.txt' }}
