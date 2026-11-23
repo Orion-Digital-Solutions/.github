@@ -6,7 +6,7 @@ on:
     paths:
       # Re-sync whenever the canonical label set is updated in the .github repo.
       # You do not need to maintain a local labels.yml — the reusable workflow
-      # always reads from orion-digital-solutions/.github@main.
+      # reads the canonical labels.yml from orion-digital-solutions/.github.
       - ".github/workflows/label-sync.yml"
   workflow_dispatch:
     inputs:
@@ -24,7 +24,7 @@ permissions:
 jobs:
   labels:
     name: Label Sync
-    uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@v1
     with:
       # Set to true only if you want a strict sync that removes any labels
       # that are not in the org canonical set.  Defaults to false (additive).

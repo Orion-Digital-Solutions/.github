@@ -7,7 +7,7 @@ name: Release Please (Reusable)
 #   permissions:
 #     contents: write
 #     pull-requests: write
-#   uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
+#   uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v1
 #   with:
 #     release-type: python
 #     # Optional — act as a GitHub App so Release PRs / releases trigger CI:

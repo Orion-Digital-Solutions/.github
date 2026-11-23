@@ -6,6 +6,8 @@ This is the **central engineering standards repository** for the Orion Digital S
 2. **Shared CI/CD pipelines** — reusable workflows that every project repo can adopt with a single file, giving the entire organization a consistent, maintainable CI pipeline from one source of truth.
 
 > If you are a developer adding CI to a new repository, jump straight to [Quick Start](#quick-start--adding-ci-to-a-new-repository).
+>
+> Already calling the shared workflows at `@main`? Follow [MIGRATION.md](MIGRATION.md) to move to `@v1`.
 
 ---
 
@@ -24,6 +26,7 @@ This is the **central engineering standards repository** for the Orion Digital S
 - [Commit Message Convention](#commit-message-convention)
 - [Overriding Org Defaults](#overriding-org-defaults)
 - [Updating This Repository](#updating-this-repository)
+- [Migrating from `@main` to `@v1`](MIGRATION.md)
 
 ---
 
@@ -69,6 +72,8 @@ This is the **central engineering standards repository** for the Orion Digital S
 │   ├── dependency-review.yml + .json   PR dependency vulnerability review
 │   └── codeql-analysis.yml + .json     GitHub CodeQL static analysis
 │
+├── MIGRATION.md                        Moving a caller from @main to @v1
+├── ROADMAP.md                          CI/CD roadmap for the shared workflows
 ├── CODE_OF_CONDUCT.md                  Community standards (org-wide default)
 ├── CONTRIBUTING.md                     Contribution guidelines (org-wide default)
 ├── SECURITY.md                         Vulnerability disclosure policy (org-wide default)
@@ -91,13 +96,17 @@ name: Orion CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]      # default branch only; PRs cover every other branch
   pull_request:
-    branches: [main]
   release:
     types: [created]
   schedule:
     - cron: "0 6 * * 1"   # weekly full-history scan, Monday 06:00 UTC
+
+# New commits on a PR cancel that PR's older run; other runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Maximum the orchestrator requests; each shared job narrows further.
 # Required — see "Workflow permissions" below.
@@ -112,7 +121,7 @@ permissions:
 jobs:
   ci:
     name: Orion CI
-    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
     with:
       sonar-project-key: orion-digital-solutions_YOUR-REPO-NAME   # ← change this
       release-type: python                                          # ← change or remove
@@ -126,6 +135,8 @@ jobs:
 Replace `YOUR-REPO-NAME` with your GitHub repository name (lowercase, hyphens). See [SonarCloud Setup](#sonarcloud-setup-per-repository) for creating the project key.
 
 Keep the `permissions:` block and pass secrets by name as shown — do **not** use `secrets: inherit`, which hands every org secret to the shared workflows. A secret that is not set at org or repo level is simply passed as empty.
+
+Reference the shared workflows at **`@v1`**, the moving tag for the latest `v1.x.y` release. To choose when you upgrade, pin `@v1.0.0` (or any `vX.Y.Z`) or a full commit SHA instead. Do not use `@main`: it changes on every merge, before a release has been tested. See [How callers pin](CONTRIBUTING.md#how-callers-pin).
 
 ### Step 2 — Set your release type
 
@@ -150,13 +161,10 @@ See [SonarCloud Setup](#sonarcloud-setup-per-repository) below.
 
 Commit and push the workflow file. The pipeline will run on the next push or PR. Check the **Actions** tab → select the run → **Summary** tab at the top of the run for the consolidated CI report.
 
-The [starter template](workflow-templates/ci.yml) does **not** set `concurrency`, so a new push to the same branch does not cancel a run already in progress. To get that behaviour (saves Actions minutes and avoids redundant scans), add a workflow-level block to your caller file, for example:
+The triggers and `concurrency` block above (the same as in the [starter template](workflow-templates/ci.yml)) keep billed minutes down:
 
-```yaml
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-```
+- **One run per commit on a PR.** `push` fires only on the default branch and `pull_request` covers every other branch, so a push to a branch with an open PR starts one run, not a push run plus a PR run. If you need CI on a long-lived branch such as `develop` without an open PR, add it to `push.branches` and accept the second run while a PR from it is open. If your default branch is not `main`, change the trigger and set the `main-branch` input.
+- **Superseded PR runs are cancelled.** A new commit on a PR cancels that PR's run still in progress. Pushes to the default branch, releases and scheduled runs each get their own group, so they are never cancelled or dropped from a queue.
 
 ---
 
@@ -207,7 +215,7 @@ Do **not** grant "Read and write" org-wide. Instead, every workflow declares the
 
 ### The Orchestrator — `ci.yml` (recommended)
 
-The orchestrator is the **recommended way** to adopt CI. One file in your repo calls all pipelines. Updates made to the orchestrator in this `.github` repo automatically apply to every project repo on their next run — no changes needed in individual repos. The orchestrator calls its child workflows by **relative path** (`./.github/workflows/<file>.yml`), so they always come from the same commit as the `ci.yml` your repo references.
+The orchestrator is the **recommended way** to adopt CI. One file in your repo calls all pipelines. Fixes and compatible features reach every repo that calls `@v1` when the `v1` tag is moved to a new release — no changes needed in individual repos. Breaking changes go to a new major tag (`v2`) that you adopt deliberately. The orchestrator calls its child workflows by **relative path** (`./.github/workflows/<file>.yml`), so they always come from the same commit as the `ci.yml` your repo references.
 
 #### Execution model
 
@@ -248,7 +256,7 @@ Phase 1 wall-clock time is driven by the slowest of the scans plus Docker (when 
 ### Orchestrator Input Reference
 
 ```yaml
-uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
 with:
   # ── SonarCloud (single project) ────────────────────────────────────────
   sonar-project-key: ""              # Single-project scan.
@@ -396,6 +404,8 @@ project's check (e.g. `SonarCloud (…-web)`, `SonarCloud (…-api)`) as require
 | `release` created | ✅ delta | ✅ (if project key set) | — (skipped) | ✅ if Dockerfile found | — | ✅ (attach to release) |
 | `schedule` (weekly) | ✅ full history | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
 
+This table is what the orchestrator does for each event it receives. The [Quick Start](#step-1--create-the-workflow-file) triggers send it `push` only for the default branch; add other branches to `push.branches` to get the "other branch" row.
+
 **Docker pipeline** lints **every** `Dockerfile` in the repo — at the root or any subdirectory (e.g. `apps/api/Dockerfile`, also matches `Dockerfile.*` variants), one matrix leg per file. Non-production paths (`examples`, `test`, `tests`, `fixtures`, `docs`, `node_modules`, `vendor`) are excluded, plus any `docker-exclude` globs; each leg's build context defaults to its Dockerfile's directory. Pin a single file with `dockerfile`, or an explicit set with `docker-targets` (either disables auto-detect). If no Dockerfile is found, the Docker job is **skipped** and does not block Release Please.
 
 **Delta scanning** means only changed commits are scanned for secrets on non-schedule events (including `release` triggers, which behave like a push for Gitleaks). SonarCloud still runs a full analysis of the repository on each trigger; Quality Gate and PR decoration focus on **new code** relative to your SonarCloud new-code definition. License compliance runs on the current dependency tree (Trivy) whenever that job is enabled — it is **skipped** on `release` events only. SBOM may run on `release` and attach to the release assets; Release Please may also attach SBOMs when a release is created (see [SBOM on releases (two paths)](#sbom-on-releases-two-paths) below).
@@ -414,7 +424,7 @@ permissions:
 
 jobs:
   secrets:
-    uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@v1
     with:
       full-scan: false               # true = full history, false = delta (default)
       gitleaks-version: "v8.30.1"   # optional — pin a specific version
@@ -438,7 +448,7 @@ permissions:
 
 jobs:
   docker:
-    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v1
     with:
       dockerfile: Dockerfile
       image-name: myapp:ci
@@ -460,7 +470,7 @@ permissions:
 
 jobs:
   sonar:
-    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@v1
     with:
       project-key: orion-digital-solutions_my-repo   # required
       python-version: "3.11"                          # optional
@@ -483,7 +493,7 @@ permissions:
 
 jobs:
   license:
-    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@v1
     with:
       forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"   # optional override; blank = default list
       install-command: "npm ci --omit=dev --ignore-scripts"   # optional, see below
@@ -515,7 +525,7 @@ permissions:
 
 jobs:
   sbom:
-    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@v1
     with:
       attach-to-release: true   # attach to GitHub Release assets (default)
       attest: false             # sign with Sigstore (optional)
@@ -532,7 +542,7 @@ permissions:
 
 jobs:
   release:
-    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v1
     with:
       release-type: python    # required (or manifest-mode: true)
       app-id: ${{ vars.RELEASE_APP_ID }}   # optional — GitHub App token
@@ -553,7 +563,7 @@ permissions:
 
 jobs:
   release:
-    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v1
     with:
       release-type: python
 
@@ -712,7 +722,7 @@ Every input to the orchestrator and individual workflows has a documented defaul
 
 ```yaml
 # Override the forbidden license list for a repo with specific requirements
-uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
 with:
   sonar-project-key: orion-digital-solutions_my-repo
   forbidden-licenses: "GPL-3.0,AGPL-3.0"   # narrower than the org default
@@ -751,14 +761,14 @@ sonar.coverage.exclusions=**/tests/**,**/__init__.py
 
 ## Updating This Repository
 
-Changes to `.github/workflows/` in this repository take effect **immediately** for every project repo on their next CI run. No changes are needed in individual repos.
+Callers reference a release tag (`@v1`), so a merge to `main` does not reach them by itself: a change reaches every `@v1` caller on its next run once the `v1` tag is moved to a release that contains it. Callers still on `@main` (see [MIGRATION.md](MIGRATION.md)) pick up every merge immediately.
 
 ### To update a pipeline org-wide
 
 1. Create a branch: `git checkout -b fix/sonar-coverage-paths`
 2. Edit the relevant file under `.github/workflows/`.
-3. Open a PR against `main` — the PR description should clearly state the impact on all consuming repositories.
-4. Merge after review. All repos pick up the change automatically.
+3. Open a PR against `main` — the PR description should clearly state the impact on all consuming repositories, and link sandbox runs.
+4. Merge after review, then tag a release and move `v1` as described in [CONTRIBUTING.md — Releasing the shared workflows](CONTRIBUTING.md#releasing-the-shared-workflows). A breaking change gets a new major tag instead.
 
 Every third-party action, in the shared workflows and in the templates, is pinned to a full commit SHA with the version in a trailing comment (`uses: actions/checkout@<sha> # v7.0.1`), so a moved or hijacked tag cannot change what runs. Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml)) bumps the pins in `.github/workflows/` weekly, with a 7-day cool-down so a new release is at least a week old before it is proposed. Dependabot does not scan `workflow-templates/`: when you merge a Dependabot bump, update the same pins in the templates by hand.
 

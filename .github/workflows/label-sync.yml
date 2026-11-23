@@ -7,7 +7,7 @@ name: Label Sync (Reusable)
 #   permissions:
 #     contents: read
 #     issues: write
-#   uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@main
+#   uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@v1
 #
 # ── What it does ─────────────────────────────────────────────────────────────
 # 1. Checks out orion-digital-solutions/.github to read labels.yml.
@@ -74,7 +74,9 @@ jobs:
         with:
           persist-credentials: false
           repository: orion-digital-solutions/.github
-          # Moves to the release tag (v1) in Phase 5.
+          # Deliberately main, not the release tag: the label set is org-wide
+          # data, so every caller syncs the current canonical labels regardless
+          # of which workflow version it pins.
           ref: main
           sparse-checkout: labels.yml
           sparse-checkout-cone-mode: false

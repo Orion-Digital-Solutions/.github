@@ -15,7 +15,7 @@ permissions:
 jobs:
   release:
     name: Release Please
-    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v1
     with:
       # ── Required — set the correct type for this project ─────────────────
       # Common values: python, node, java, maven, dotnet, go, simple
@@ -23,10 +23,16 @@ jobs:
 
       # ── Optional overrides ───────────────────────────────────────────────
       # target-branch: "main"              # default
-      # version-file: "pyproject.toml"     # auto-detected from release-type
-      # changelog-path: "CHANGELOG.md"     # default
+      # app-id: ${{ vars.RELEASE_APP_ID }} # GitHub App token, so Release PRs and
+      #                                      releases trigger other workflows
+      #                                      (also pass RELEASE_APP_PRIVATE_KEY below)
+      # Changelog path/sections and extra version files: set them in
+      # release-please-config.json with manifest-mode: true (the old
+      # version-file / changelog-path inputs are deprecated and ignored).
       # generate-sbom-on-release: true     # default in reusable wf — SBOM on release via post-release job
       #                                      (orchestrator also runs sbom on `release` events — see org README)
+    # secrets:
+    #   RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}   # with app-id
 
   # ── Example: use the release outputs in a downstream deploy job ──────────
   # deploy:
