@@ -7,7 +7,7 @@ name: Stale Issue & PR Management (Reusable)
 #   permissions:
 #     issues: write
 #     pull-requests: write
-#   uses: orion-digital-solutions/.github/.github/workflows/stale.yml@main
+#   uses: orion-digital-solutions/.github/.github/workflows/stale.yml@v1
 #
 # ── Stale lifecycle ───────────────────────────────────────────────────────────
 # 1. After `days-before-issue-stale` / `days-before-pr-stale` days of no

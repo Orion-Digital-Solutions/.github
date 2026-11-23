@@ -6,7 +6,7 @@ name: Orion CI Orchestrator (Reusable)
 # ── Caller usage (add ONE file to each project repo) ─────────────────────────
 #
 #   Single project (most repos):
-#     uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
+#     uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
 #     with:
 #       sonar-project-key: orion-digital-solutions_my-repo
 #       release-type: python

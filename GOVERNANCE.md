@@ -114,24 +114,28 @@ Every reusable workflow exposes documented inputs. Pass non-default values at th
 ```yaml
 jobs:
   ci:
-    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
     with:
       forbidden-licenses: "GPL-3.0,AGPL-3.0"   # narrower than the org default
       secret-scan-full-history: true
-    secrets: inherit
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}
 ```
 
 See the [Orchestrator Input Reference](README.md#orchestrator-input-reference) for the full list.
 
 ### Pinning to a specific version
 
-By default, callers use `@main` and automatically receive all updates. To freeze a repository at a known-good version, pin to a tag or commit SHA:
+Callers use the moving major tag `@v1`, which receives every reviewed, sandbox-tested fix and non-breaking improvement (see the release procedure in [CONTRIBUTING.md](CONTRIBUTING.md)). Breaking changes ship as a new major (`@v2`). To freeze a repository at an exact version, pin to an immutable release tag or a commit SHA:
 
 ```yaml
-uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1.2.0
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1.0.0
 ```
 
-Note that pinned repositories no longer receive automatic security fixes. The DevOps team does not guarantee long-term support for pinned versions.
+Exactly pinned repositories do not receive security fixes until they bump the pin. Do not reference `@main`: it is the integration branch, not a release. See [MIGRATION.md](MIGRATION.md) for moving from `@main` to `@v1`.
 
 ---
 
