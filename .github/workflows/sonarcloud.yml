@@ -144,16 +144,25 @@ on:
         description: "SonarCloud authentication token (use the org-level SONAR_TOKEN secret)"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   sonarcloud:
     name: SonarCloud Scan
     runs-on: ${{ inputs.runner }}
+    # Read-only: checkout needs contents. The scanner and Quality Gate talk to
+    # SonarCloud with SONAR_TOKEN, and the same-run artifact download uses the
+    # runtime token, so neither needs GITHUB_TOKEN scopes.
+    permissions:
+      contents: read
 
     steps:
       # ── 1. Checkout ─────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           fetch-depth: ${{ inputs.fetch-depth }}
 
       # ── 2. Optional Runtime Setup ────────────────────────────────────────
@@ -220,12 +229,52 @@ jobs:
       # ── 3. Build Dynamic Sonar Properties ───────────────────────────────
       # If the repo already has a sonar-project.properties file, Sonar will
       # merge these extra args with it. If not, these args define the project.
+      # Inputs are passed via env (never pasted into the script) so their
+      # contents cannot run as shell code.
       - name: Resolve SonarCloud scan properties
         id: sonar-props
         shell: bash
         env:
-          NODE_FOR_SONAR: ${{ steps.node.outputs.version }}
+          NODE_FOR_SONAR:     ${{ steps.node.outputs.version }}
+          PROJECT_KEY:        ${{ inputs.project-key }}
+          SONAR_ORGANIZATION: ${{ inputs.sonar-organization }}
+          PROJECT_NAME:       ${{ inputs.project-name }}
+          SOURCES:            ${{ inputs.sources }}
+          EXCLUSIONS:         ${{ inputs.exclusions }}
+          PY_COVERAGE_REPORT: ${{ inputs.python-coverage-report }}
+          JS_COVERAGE_REPORT: ${{ inputs.js-coverage-report }}
+          SONAR_EXTRA_ARGS:   ${{ inputs.sonar-extra-args }}
         run: |
+          # EXTRA_ARGS is written to $GITHUB_OUTPUT as ONE key=value line, so a
+          # newline/CR in any input could inject extra output keys. Reject those.
+          # Trailing newlines (e.g. from a YAML `>` or `|` block scalar) are
+          # trimmed first, so callers that used block scalars keep working.
+          trim_trailing_newlines() {  # $1 = variable name
+            local v="${!1}"
+            while [[ "$v" == *$'\n' || "$v" == *$'\r' ]]; do v="${v%?}"; done
+            printf -v "$1" '%s' "$v"
+          }
+          for var in PROJECT_KEY SONAR_ORGANIZATION PROJECT_NAME SOURCES EXCLUSIONS \
+                     PY_COVERAGE_REPORT JS_COVERAGE_REPORT SONAR_EXTRA_ARGS; do
+            trim_trailing_newlines "$var"
+          done
+          require_single_line() {  # $1 = input name, $2 = value
+            case "$2" in
+              *$'\n'* | *$'\r'*)
+                echo "::error::Input '$1' must not contain a newline or carriage return."
+                exit 1
+                ;;
+            esac
+          }
+          require_single_line project-key            "${PROJECT_KEY}"
+          require_single_line sonar-organization     "${SONAR_ORGANIZATION}"
+          require_single_line project-name           "${PROJECT_NAME}"
+          require_single_line sources                "${SOURCES}"
+          require_single_line exclusions             "${EXCLUSIONS}"
+          require_single_line python-coverage-report "${PY_COVERAGE_REPORT}"
+          require_single_line js-coverage-report     "${JS_COVERAGE_REPORT}"
+          require_single_line sonar-extra-args       "${SONAR_EXTRA_ARGS}"
+
           EXTRA_ARGS=""
 
           # JRE auto-provisioning is intentionally LEFT ENABLED: the scanner downloads
@@ -239,28 +288,28 @@ jobs:
 
           # Project key & org are always injected (can be overridden by
           # sonar-project.properties in the calling repo).
-          EXTRA_ARGS+="-Dsonar.projectKey=${{ inputs.project-key }} "
-          EXTRA_ARGS+="-Dsonar.organization=${{ inputs.sonar-organization }} "
+          EXTRA_ARGS+="-Dsonar.projectKey=${PROJECT_KEY} "
+          EXTRA_ARGS+="-Dsonar.organization=${SONAR_ORGANIZATION} "
 
           # sonarqube-scan-action splits `args` with string-argv: quotes INSIDE a token
           # are kept literally, so wrap the whole token to allow spaces in the name.
-          if [ -n "${{ inputs.project-name }}" ]; then
-            EXTRA_ARGS+="\"-Dsonar.projectName=${{ inputs.project-name }}\" "
+          if [ -n "${PROJECT_NAME}" ]; then
+            EXTRA_ARGS+="\"-Dsonar.projectName=${PROJECT_NAME}\" "
           fi
 
           # Monorepo base dir (sonar.projectBaseDir) is passed via the scan action's
           # `projectBaseDir` input (step 4) — sources/exclusions/coverage paths below
           # are interpreted relative to it. Defaults to the repo root.
 
-          EXTRA_ARGS+="-Dsonar.sources=${{ inputs.sources }} "
-          EXTRA_ARGS+="-Dsonar.exclusions=${{ inputs.exclusions }} "
+          EXTRA_ARGS+="-Dsonar.sources=${SOURCES} "
+          EXTRA_ARGS+="-Dsonar.exclusions=${EXCLUSIONS} "
 
-          if [ -n "${{ inputs.python-coverage-report }}" ]; then
-            EXTRA_ARGS+="-Dsonar.python.coverage.reportPaths=${{ inputs.python-coverage-report }} "
+          if [ -n "${PY_COVERAGE_REPORT}" ]; then
+            EXTRA_ARGS+="-Dsonar.python.coverage.reportPaths=${PY_COVERAGE_REPORT} "
           fi
 
-          if [ -n "${{ inputs.js-coverage-report }}" ]; then
-            EXTRA_ARGS+="-Dsonar.javascript.lcov.reportPaths=${{ inputs.js-coverage-report }} "
+          if [ -n "${JS_COVERAGE_REPORT}" ]; then
+            EXTRA_ARGS+="-Dsonar.javascript.lcov.reportPaths=${JS_COVERAGE_REPORT} "
           fi
 
           # Point the JS/TS analyzer at the runner's Node explicitly when it is a
@@ -276,8 +325,9 @@ jobs:
           fi
 
           # Language-agnostic passthrough for any other coverage / scanner props.
-          if [ -n "${{ inputs.sonar-extra-args }}" ]; then
-            EXTRA_ARGS+="${{ inputs.sonar-extra-args }} "
+          # Appended as raw text; the scan action splits it into tokens (step 4).
+          if [ -n "${SONAR_EXTRA_ARGS}" ]; then
+            EXTRA_ARGS+="${SONAR_EXTRA_ARGS} "
           fi
 
           echo "extra_args=${EXTRA_ARGS}" >> "$GITHUB_OUTPUT"
