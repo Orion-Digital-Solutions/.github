@@ -104,6 +104,7 @@ jobs:
           output-file:      ${{ inputs.artifact-name }}.spdx.json
           upload-artifact:  true
           artifact-name:    ${{ inputs.artifact-name }}-spdx.json
+          upload-artifact-retention: ${{ inputs.artifact-retention-days }}
           upload-release-assets: ${{ inputs.attach-to-release && github.event_name == 'release' }}
 
       # ── Generate CycloneDX JSON SBOM ─────────────────────────────────────
@@ -115,6 +116,7 @@ jobs:
           output-file:      ${{ inputs.artifact-name }}.cyclonedx.json
           upload-artifact:  true
           artifact-name:    ${{ inputs.artifact-name }}-cyclonedx.json
+          upload-artifact-retention: ${{ inputs.artifact-retention-days }}
           upload-release-assets: ${{ inputs.attach-to-release && github.event_name == 'release' }}
 
       # ── Optional: signed SBOM attestation (Sigstore) ─────────────────────

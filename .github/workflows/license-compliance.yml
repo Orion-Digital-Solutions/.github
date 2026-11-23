@@ -10,6 +10,29 @@ name: License Compliance (Reusable)
 #   uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
 #   with:
 #     forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
+#     install-command: "npm ci --omit=dev --ignore-scripts"
+#
+# ── Where Trivy reads licences from (fs scan) ────────────────────────────────
+# Lock files alone only carry licences for npm (package-lock.json). For the
+# others, Trivy reads licences from installed packages, so set install-command
+# to something that leaves them where Trivy looks:
+# • pip (requirements.txt): the site-packages of $VIRTUAL_ENV, else of the
+#   `python3` on PATH. The runner's system Python has no site-packages dir, so
+#   install into a venv and export VIRTUAL_ENV through $GITHUB_ENV:
+#     python3 -m venv "$RUNNER_TEMP/venv" && "$RUNNER_TEMP/venv/bin/pip" install -r requirements.txt && echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+#   Pipenv, Poetry and uv lock files get no licence data from Trivy at all.
+# • pnpm: node_modules next to pnpm-lock.yaml, inside scan-path:
+#     corepack enable && pnpm install --frozen-lockfile --prod --ignore-scripts
+# • Yarn Classic: node_modules next to yarn.lock, inside scan-path:
+#     yarn install --frozen-lockfile --production --ignore-scripts
+# • Yarn 2+: .yarn/cache (or .yarn/unplugged) next to yarn.lock; Yarn 4 uses a
+#   global cache by default, so turn it off:
+#     corepack enable && YARN_ENABLE_GLOBAL_CACHE=false yarn install --immutable
+# • Go: vendor/ next to go.mod, or the module cache at $GOPATH/pkg/mod
+#   (default ~/go/pkg/mod; a custom GOMODCACHE is not read):
+#     go mod download
+# The command runs from the repository root; prefix `cd <dir> &&` for a
+# project in a subdirectory.
 #
 # ── Why this matters ──────────────────────────────────────────────────────────
 # As a consulting firm delivering software to enterprise clients, GPL/AGPL
@@ -23,11 +46,14 @@ name: License Compliance (Reusable)
 on:
   workflow_call:
     inputs:
+      # Empty means the default list. The default lives in ONE place: the
+      # DEFAULT_FORBIDDEN_LICENSES env on the license-check job below. (The
+      # orchestrator always passes this input, as "" when its caller doesn't.)
       forbidden-licenses:
-        description: "Comma-separated SPDX license IDs to treat as violations"
+        description: "Comma-separated SPDX license IDs to treat as violations. Leave blank for the default list (DEFAULT_FORBIDDEN_LICENSES in this workflow)."
         required: false
         type: string
-        default: "GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0,LGPL-2.0,LGPL-2.1,LGPL-3.0,EUPL-1.1,EUPL-1.2,CCDL-1.0,OSL-3.0"
+        default: ""
 
       allowed-licenses:
         description: "Comma-separated SPDX license IDs that are explicitly permitted"
@@ -46,6 +72,14 @@ on:
         required: false
         type: string
         default: "HIGH,CRITICAL"
+
+      # See "Where Trivy reads licences from" at the top for what the command
+      # must leave behind for each ecosystem.
+      install-command:
+        description: "Command that installs production dependencies before the scan, so Trivy can read licences that lock files don't carry (pip, pnpm, Yarn, Go). Runs from the repository root. Leave blank to scan lock files only."
+        required: false
+        type: string
+        default: ""
 
       upload-sarif:
         description: "Upload SARIF results to GitHub Security tab"
@@ -73,6 +107,10 @@ jobs:
       contents: read
       security-events: write
       actions: read
+    # Single source of the default forbidden list, used when the
+    # forbidden-licenses input is blank.
+    env:
+      DEFAULT_FORBIDDEN_LICENSES: "GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0,LGPL-2.0,LGPL-2.1,LGPL-3.0,EUPL-1.1,EUPL-1.2,CCDL-1.0,OSL-3.0"
 
     steps:
       - name: Checkout repository
@@ -80,7 +118,25 @@ jobs:
         with:
           persist-credentials: false
 
+      # ── Optional: install dependencies so Trivy can read their licences ──
+      # Without this, pip/pnpm/Yarn/Go packages are listed with no licence
+      # and cannot match the forbidden list. A failing command fails the job.
+      - name: Install production dependencies
+        shell: bash
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+        run: |
+          if [ -z "${INSTALL_COMMAND//[[:space:]]/}" ]; then
+            echo "::warning::No install-command set: licences for pip, pnpm, Yarn and Go dependencies cannot be read from lock files alone, so the licence gate may pass without checking them. Set install-command to install production dependencies before the scan."
+            exit 0
+          fi
+          bash -c "${INSTALL_COMMAND}"
+
       # ── Build Trivy config from inputs ───────────────────────────────────
+      # Lists are split on commas (or newlines), trimmed, and blank entries
+      # dropped. A blank forbidden list falls back to the default; a blank
+      # allowed list writes no `ignored:` key. jq writes the config as JSON,
+      # which is valid YAML and quotes every entry safely.
       - name: Prepare Trivy license config
         id: license-config
         shell: bash
@@ -88,13 +144,21 @@ jobs:
           FORBIDDEN: ${{ inputs.forbidden-licenses }}
           ALLOWED:   ${{ inputs.allowed-licenses }}
         run: |
-          cat > trivy-license.yaml << EOF
-          license:
-            forbidden:
-          $(echo "${FORBIDDEN}" | tr ',' '\n' | sed 's/^/    - /')
-            ignored:
-          $(echo "${ALLOWED}"   | tr ',' '\n' | sed 's/^/    - /')
-          EOF
+          jq -n \
+            --arg forbidden "$FORBIDDEN" \
+            --arg default "$DEFAULT_FORBIDDEN_LICENSES" \
+            --arg allowed "$ALLOWED" \
+            'def list: [splits("[,\n]") | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "") | select(length > 0)];
+             ($forbidden | list) as $f
+             | ($allowed | list) as $a
+             | {license: (
+                 {forbidden: (if ($f | length) > 0 then $f else ($default | list) end)}
+                 + (if ($a | length) > 0 then {ignored: $a} else {} end)
+               )}' > trivy-license.yaml
+
+          EFFECTIVE=$(jq -r '.license.forbidden | join(",")' trivy-license.yaml)
+          echo "Forbidden licences: ${EFFECTIVE}"
+          echo "forbidden=${EFFECTIVE}" >> "$GITHUB_OUTPUT"
           echo "config_path=trivy-license.yaml" >> "$GITHUB_OUTPUT"
 
       # ── Scan 1: Table (job log summary) — fails on violations ────────────
@@ -130,7 +194,8 @@ jobs:
         if: always()
         shell: bash
         env:
-          FORBIDDEN: ${{ inputs.forbidden-licenses }}
+          # The effective list (default applied, entries trimmed), not the raw input.
+          FORBIDDEN: ${{ steps.license-config.outputs.forbidden }}
           SEVERITY:  ${{ inputs.severity }}
         run: |
           RAW_FILE="trivy-license-raw.json"
@@ -152,7 +217,7 @@ jobs:
             --argjson violation_count "$VIOLATIONS" \
             '{
               meta: {
-                forbidden_licenses: ($forbidden | split(",")),
+                forbidden_licenses: ($forbidden | split(",") | map(select(length > 0))),
                 severity_filter: $severity,
                 total_packages: $total_packages,
                 violation_count: $violation_count
@@ -208,8 +273,11 @@ jobs:
           echo "available=false" >> "$GITHUB_OUTPUT"
 
       # ── Scan 3: SARIF (GitHub Security tab) ──────────────────────────────
+      # SARIF is supplementary; it must never fail the job. The verdict
+      # comes from the table scan above.
       - name: Trivy license scan — SARIF (Security tab)
         if: inputs.upload-sarif && !cancelled() && steps.code-scanning-preflight.outputs.available == 'true'
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type:    fs
@@ -223,6 +291,7 @@ jobs:
 
       - name: Upload SARIF to GitHub Security tab
         if: inputs.upload-sarif && !cancelled() && steps.code-scanning-preflight.outputs.available == 'true'
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-license.sarif

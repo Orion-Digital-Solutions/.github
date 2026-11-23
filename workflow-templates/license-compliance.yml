@@ -21,10 +21,15 @@ jobs:
   license-check:
     name: License Compliance
     uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
-    with:
+    # Uncomment `with:` together with any option below. An empty `with:` is invalid.
+    # with:
       # Default forbidden list covers copyleft licenses (GPL, AGPL, LGPL).
       # Override here if this project has specific licence requirements.
       # forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
       #
       # Path to scan (default: repo root).
       # scan-path: "."
+      #
+      # Install production dependencies first so Trivy can read licences that
+      # lock files don't carry (pip, pnpm, Yarn, Go). See the shared workflow.
+      # install-command: "npm ci --omit=dev"

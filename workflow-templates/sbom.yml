@@ -18,7 +18,8 @@ jobs:
   sbom:
     name: SBOM Generation
     uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
-    with:
+    # Uncomment `with:` together with any option below. An empty `with:` is invalid.
+    # with:
       # scan-path: "."                     # default: repo root
       # artifact-name: "sbom"              # default
       # artifact-retention-days: 30        # default
