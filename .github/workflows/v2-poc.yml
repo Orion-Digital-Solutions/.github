@@ -1,0 +1,25 @@
+name: v2 packaging probe (reusable)
+
+# ROADMAP 6.1 proof of concept (docs/v2-design.md section 11, run 3).
+# Not for callers. Deleted once the v2 composite actions exist.
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Show job.workflow_* (informational)
+        env:
+          WF_REPO: ${{ job.workflow_repository }}
+          WF_SHA: ${{ job.workflow_sha }}
+        run: echo "defined in ${WF_REPO}@${WF_SHA}"
+      - uses: $/.github/actions/v2-poc
+        with:
+          plant-decoy: "true"

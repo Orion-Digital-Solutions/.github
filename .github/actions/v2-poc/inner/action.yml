@@ -1,0 +1,21 @@
+name: v2 packaging probe (inner)
+description: >-
+  ROADMAP 6.1 proof of concept. Reads marker.txt from its own directory and
+  returns it, so the caller can tell which commit (or which decoy) it ran.
+
+outputs:
+  marker:
+    description: Contents of marker.txt next to this file.
+    value: ${{ steps.read.outputs.marker }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read marker shipped with this action
+      id: read
+      shell: bash
+      run: |
+        set -euo pipefail
+        marker="$(tr -d '\r\n' < "${GITHUB_ACTION_PATH}/marker.txt")"
+        echo "Inner action at ${GITHUB_ACTION_PATH} read marker '${marker}'"
+        echo "marker=${marker}" >> "${GITHUB_OUTPUT}"
