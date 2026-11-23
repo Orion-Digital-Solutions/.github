@@ -236,8 +236,13 @@ jobs:
 
       # ── 2b. Download coverage report(s) from an earlier job ──────────────
       # This workflow does NOT run your tests — coverage must be produced by an
-      # earlier job in the same run and uploaded as an artifact. We download it
-      # into the workspace root so the report paths resolve at scan time.
+      # earlier job in the same run and uploaded as an artifact.
+      # ROADMAP 7.3: the artifact is extracted into its OWN directory under
+      # RUNNER_TEMP, never over the checkout (an artifact built by a job that
+      # ran tests and third-party code could otherwise replace tracked files,
+      # e.g. sonar-project.properties or sources, before the scan that holds
+      # SONAR_TOKEN). Step 2c then copies ONLY the declared report files into
+      # the checkout, so the report-path inputs keep working unchanged.
       # continue-on-error: a missing artifact should not mask the scan — the scan
       # still runs and the Quality Gate reports the (low/zero) coverage clearly.
       # download-artifact v8: a zipped artifact (the upload-artifact default) is
@@ -245,12 +250,202 @@ jobs:
       # (`archive: false`) is saved as-is; a digest mismatch now errors, which
       # continue-on-error turns into a skipped download, not a failed job.
       - name: Download coverage artifact (${{ inputs.coverage-artifact }})
+        id: coverage-download
         if: inputs.coverage-artifact != ''
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.coverage-artifact }}
-          path: .
+          path: ${{ runner.temp }}/sonar-coverage-artifact
+
+      # ── 2c. Copy the declared report files into the checkout ────────────
+      # Backward compatible with v1, which extracted the artifact over the
+      # workspace root: a report declared as P (relative to base-dir B, as
+      # Sonar reads it) is taken from <artifact>/B/P, exactly where v1 put it,
+      # and copied to <workspace>/B/P. If that is absent and B is set,
+      # <artifact>/P is tried too (an artifact holding base-dir-relative
+      # paths). Declared report paths are read from:
+      #   python-coverage-report, js-coverage-report (comma-separated lists),
+      #   every -Dsonar.<key>=<paths> in sonar-extra-args, and every sonar.<key>
+      #   in <base-dir>/sonar-project.properties (single-line entries),
+      #   where <key> ends in reportPath(s) / reportsPath(s), any case
+      #   (e.g. sonar.go.coverage.reportPaths, sonar.coverage.jacoco.xmlReportPaths,
+      #   sonar.cs.opencover.reportsPaths, sonar.junit.reportPaths).
+      # Sonar wildcards (*, **, ?) are matched against the artifact's files
+      # (bash patterns: `*` also matches `/`). An absolute path inside the
+      # workspace counts as workspace-relative. Refused, with a warning, and
+      # not copied: an absolute path outside the workspace, a path with a `..`
+      # or `.git` component, a destination that already exists (tracked or
+      # not) or passes through a symlink, and a source that is not a regular
+      # file. Other files in the artifact are ignored; Sonar's DEFAULT report
+      # locations are not copied, so declare the path explicitly.
+      - name: Copy declared coverage reports into the checkout
+        if: steps.coverage-download.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        env:
+          ARTIFACT_DIR:       ${{ runner.temp }}/sonar-coverage-artifact
+          BASE_DIR:           ${{ inputs.base-dir }}
+          PY_COVERAGE_REPORT: ${{ inputs.python-coverage-report }}
+          JS_COVERAGE_REPORT: ${{ inputs.js-coverage-report }}
+          SONAR_EXTRA_ARGS:   ${{ inputs.sonar-extra-args }}
+        run: |
+          set -uo pipefail
+          WS="$(pwd -P)"
+          if [ ! -d "${ARTIFACT_DIR}" ]; then
+            echo "::warning::Coverage artifact directory ${ARTIFACT_DIR} not found; no coverage report copied."
+            exit 0
+          fi
+          SRC_ROOT="$(cd "${ARTIFACT_DIR}" && pwd -P)"
+
+          # Workspace-relative path checks. Prints the normalised path.
+          clean_rel() {  # $1 = path; fails on an unsafe path
+            local p="$1" out="" c
+            local IFS='/'
+            # shellcheck disable=SC2086 # split on '/' on purpose (globbing off)
+            set -f; set -- $p; set +f
+            for c in "$@"; do
+              case "$c" in
+                ''|.) ;;
+                ..|.git) return 1 ;;
+                *) out="${out:+${out}/}${c}" ;;
+              esac
+            done
+            [ -n "${out}" ] || return 1
+            printf '%s' "${out}"
+          }
+
+          BASE=""
+          if [ -n "${BASE_DIR}" ] && [ "${BASE_DIR}" != "." ]; then
+            case "${BASE_DIR}" in /*) BASE="!" ;; *) BASE="$(clean_rel "${BASE_DIR}")" || BASE="!" ;; esac
+            if [ "${BASE}" = "!" ]; then
+              echo "::warning::base-dir '${BASE_DIR}' is absolute or has a '..'/.git component; no coverage report copied."
+              exit 0
+            fi
+          fi
+
+          # ── Collect declared report paths ──
+          DECLARED=()
+          add_list() {  # $1 = comma-separated list
+            local item
+            local IFS=','
+            set -f
+            for item in $1; do
+              item="${item#"${item%%[![:space:]]*}"}"; item="${item%"${item##*[![:space:]]}"}"
+              item="${item#[\"\']}"; item="${item%[\"\']}"
+              [ -n "${item}" ] && DECLARED+=("${item}")
+            done
+            set +f
+          }
+          add_prop() {  # $1 = property key without "sonar.", $2 = value
+            if [[ "$1" =~ [Rr][Ee][Pp][Oo][Rr][Tt][Ss]?[Pp][Aa][Tt][Hh][Ss]?$ ]]; then add_list "$2"; fi
+          }
+          add_list "${PY_COVERAGE_REPORT}"
+          add_list "${JS_COVERAGE_REPORT}"
+          set -f
+          for tok in ${SONAR_EXTRA_ARGS}; do
+            tok="${tok#[\"\']}"; tok="${tok%[\"\']}"
+            if [[ "${tok}" =~ ^-Dsonar\.([^=]+)=(.*)$ ]]; then
+              add_prop "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+            fi
+          done
+          set +f
+          PROPS="${BASE:+${BASE}/}sonar-project.properties"
+          if [ -f "${PROPS}" ] && [ ! -L "${PROPS}" ]; then
+            while IFS= read -r line || [ -n "${line}" ]; do
+              line="${line%$'\r'}"
+              if [[ "${line}" =~ ^[[:space:]]*sonar\.([^=:[:space:]]+)[[:space:]]*[=:][[:space:]]*(.*)$ ]]; then
+                add_prop "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+              fi
+            done < "${PROPS}"
+          fi
+          if [ "${#DECLARED[@]}" -eq 0 ]; then
+            echo "::warning::coverage-artifact is set but no report path is declared (python-coverage-report, js-coverage-report, a -Dsonar.*reportPaths in sonar-extra-args, or ${PROPS}); nothing copied."
+            exit 0
+          fi
+
+          # ── Copy ──
+          COPIED=0; REFUSED=0; MISSING=0
+          declare -A DONE=()
+          copy_one() {  # $1 = source (absolute), $2 = destination (workspace-relative, clean)
+            local src="$1" dst="$2" part="" c
+            [ -n "${DONE[${dst}]:-}" ] && return 0
+            if [ ! -f "${src}" ] || [ -L "${src}" ]; then
+              echo "::warning::Not copied: '${src#"${SRC_ROOT}"/}' in the artifact is not a regular file."; REFUSED=$((REFUSED+1)); return 0
+            fi
+            case "$(realpath -e -- "${src}")" in
+              "${SRC_ROOT}"/*) ;;
+              *) echo "::warning::Not copied: '${src}' resolves outside the artifact."; REFUSED=$((REFUSED+1)); return 0 ;;
+            esac
+            local IFS='/'
+            set -f
+            for c in ${dst}; do
+              part="${part:+${part}/}${c}"
+              if [ -L "${part}" ]; then
+                set +f
+                echo "::warning::Not copied: '${dst}' passes through the symlink '${part}' in the checkout."; REFUSED=$((REFUSED+1)); return 0
+              fi
+            done
+            set +f
+            if [ -e "${dst}" ] || git ls-files --error-unmatch -- ":(literal)${dst}" >/dev/null 2>&1; then
+              echo "::warning::Not copied: '${dst}' already exists in the checkout (tracked files are never overwritten)."; REFUSED=$((REFUSED+1)); return 0
+            fi
+            case "$(realpath -m -- "${dst}")" in
+              "${WS}"/*) ;;
+              *) echo "::warning::Not copied: '${dst}' resolves outside the workspace."; REFUSED=$((REFUSED+1)); return 0 ;;
+            esac
+            mkdir -p -- "$(dirname -- "${dst}")" && cp -- "${src}" "${dst}" || { REFUSED=$((REFUSED+1)); return 0; }
+            DONE[${dst}]=1
+            COPIED=$((COPIED+1))
+            echo "Copied coverage report: ${dst}"
+          }
+
+          mapfile -t ART_FILES < <(cd "${SRC_ROOT}" && find . -type f -printf '%P\n' | LC_ALL=C sort)
+          for decl in "${DECLARED[@]}"; do
+            ABS=false
+            case "${decl}" in
+              "${WS}"/*) rel="${decl#"${WS}"/}"; ABS=true ;;
+              /*) echo "::warning::Not copied: '${decl}' is an absolute path outside the workspace."; REFUSED=$((REFUSED+1)); continue ;;
+              *)  rel="${decl}" ;;
+            esac
+            if ! rel="$(clean_rel "${rel}")"; then
+              echo "::warning::Not copied: '${decl}' has a '..' or .git component."; REFUSED=$((REFUSED+1)); continue
+            fi
+            # Destination and artifact path, v1 layout first; then the
+            # base-dir-relative fallback (destination still under base-dir).
+            if [ "${ABS}" = true ] || [ -z "${BASE}" ]; then PRIMARY="${rel}"; FALLBACK=""; else PRIMARY="${BASE}/${rel}"; FALLBACK="${rel}"; fi
+            FOUND=false
+            case "${rel}" in
+              *[\*\?\[]*)
+                for pat in "${PRIMARY}" ${FALLBACK:+"${FALLBACK}"}; do
+                  for f in "${ART_FILES[@]}"; do
+                    # shellcheck disable=SC2053 # pattern match on purpose
+                    if [[ "${f}" == ${pat} ]]; then
+                      FOUND=true
+                      if [ "${pat}" = "${PRIMARY}" ]; then copy_one "${SRC_ROOT}/${f}" "${f}"; else copy_one "${SRC_ROOT}/${f}" "${BASE}/${f}"; fi
+                    fi
+                  done
+                  [ "${FOUND}" = true ] && break
+                done
+                ;;
+              *)
+                for cand in "${PRIMARY}" ${FALLBACK:+"${FALLBACK}"}; do
+                  if [ -e "${SRC_ROOT}/${cand}" ] || [ -L "${SRC_ROOT}/${cand}" ]; then
+                    FOUND=true; copy_one "${SRC_ROOT}/${cand}" "${PRIMARY}"; break
+                  fi
+                done
+                ;;
+            esac
+            if [ "${FOUND}" = false ]; then
+              echo "::warning::Declared report '${decl}' not found in the artifact (looked for '${PRIMARY}'${FALLBACK:+ and '${FALLBACK}'})."
+              MISSING=$((MISSING+1))
+            fi
+          done
+          echo "Coverage reports: ${COPIED} copied, ${REFUSED} refused, ${MISSING} not in the artifact (${#ART_FILES[@]} file(s) in the artifact)."
+          if [ "${MISSING}" -gt 0 ]; then
+            echo "Artifact contents (first 20):"
+            printf '  %s\n' "${ART_FILES[@]:0:20}"
+          fi
 
       # ── 3. Build Dynamic Sonar Properties ───────────────────────────────
       # If the repo already has a sonar-project.properties file, Sonar will

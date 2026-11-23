@@ -1,0 +1,202 @@
+name: Trivy dependency vulnerability scan
+description: >-
+  Known-vulnerability (CVE) scan of the repository's dependency manifests and
+  lock files with a hash-pinned Trivy v0.70.0 filesystem scan (ROADMAP 7.1,
+  see docs/v2-design.md section 14). Substitute for GitHub dependency review,
+  which the Team plan does not offer on private repositories. Uploads a JSON
+  report artifact and, where code scanning is available, a SARIF. Does not
+  check out code: the calling job must check out the repository
+  (persist-credentials false; fetch-depth 0 on pull requests, so the base
+  branch .trivyignore can be read). Reports its verdict in the `result`
+  output and fails only in its last step, and only when `fail-on-findings` is
+  true. Runs no repository code.
+
+# ── What is scanned ───────────────────────────────────────────────────────────
+# Trivy's `fs` mode reads lock files and manifests (package-lock.json,
+# yarn.lock, pnpm-lock.yaml, requirements.txt with pinned versions,
+# Pipfile.lock, poetry.lock, uv.lock, go.mod, pom.xml, gradle.lockfile,
+# packages.lock.json, Cargo.lock, composer.lock, Gemfile.lock, ...). Without a
+# lock file only exact pins are seen (e.g. requirements.txt `==` lines), so
+# commit lock files. Installed packages (node_modules, site-packages) add no
+# vulnerability data in fs mode, so this action needs no install step and is
+# run BEFORE any caller code (see ci.yml Fast checks).
+#
+# ── Accepting a vulnerability ─────────────────────────────────────────────────
+# List the CVE id in `.trivyignore` at the repository root (Trivy syntax,
+# `exp:` expiry dates supported). On pull requests the BASE branch copy is
+# used, so a PR cannot ignore its own new finding. `trivy.yaml` in the
+# repository is never read.
+#
+# ── Artifacts and SARIF ───────────────────────────────────────────────────────
+#   dependency-vuln-report<artifact-suffix>  dependency-vuln-report.json:
+#     {meta: {scan_path, sha, scan_status, severity_filter, ignore_unfixed,
+#             trivyignore, targets_scanned, vulnerability_count, by_severity},
+#      results: <Trivy Results at `severity`>}
+#   SARIF category: trivy-dependencies<artifact-suffix>, at `severity` only,
+#   uploaded when upload-sarif is true and code scanning is available
+#   (probed first; public repositories on the Team plan). The calling job then
+#   needs security-events: write and actions: read.
+#
+# ── Verdict ───────────────────────────────────────────────────────────────────
+# `result`: clean | findings | error. findings = at least one vulnerability
+# at `severity` (after ignore-unfixed and .trivyignore). error = Trivy could
+# not be installed or could not scan, or the report could not be produced or
+# uploaded after a clean scan. SARIF steps never change the verdict.
+# ─────────────────────────────────────────────────────────────────────────────
+
+inputs:
+  severity:
+    description: "Comma-separated severities that count as findings (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)"
+    required: false
+    default: "CRITICAL,HIGH"
+  ignore-unfixed:
+    description: "'true' (default): skip vulnerabilities that have no fixed version yet"
+    required: false
+    default: "true"
+  scan-path:
+    description: "Directory to scan, relative to the repository root"
+    required: false
+    default: "."
+  upload-sarif:
+    description: "'true' (default): upload SARIF when code scanning is available (probed first)"
+    required: false
+    default: "true"
+  artifact-suffix:
+    description: "Appended verbatim to the artifact name `dependency-vuln-report` and the SARIF category `trivy-dependencies`. Empty for the orchestrator."
+    required: false
+    default: ""
+  fail-on-findings:
+    description: "'true' (default): the last step fails when `result` is not clean (findings or error). 'false': never fail; read the `result` output instead."
+    required: false
+    default: "true"
+  token:
+    description: "Token for the code-scanning availability check and the SARIF upload (composite actions cannot read secrets.GITHUB_TOKEN)."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: "clean | findings | error"
+    value: ${{ steps.verdict.outputs.result }}
+  findings-count:
+    description: "Number of vulnerabilities at `severity`. Empty when the scan did not complete."
+    value: ${{ steps.verdict.outputs.findings-count }}
+  report-path:
+    description: "Absolute path of dependency-vuln-report.json (under RUNNER_TEMP). Empty when the scan did not run."
+    value: ${{ steps.verdict.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    # The tarball is checked against the SHA-256 pinned in install-trivy.sh.
+    # Everything this action writes lives under RUNNER_TEMP, not the checkout.
+    - name: Install Trivy v0.70.0
+      id: install
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -euo pipefail
+        WORK_DIR="$(mktemp -d "${RUNNER_TEMP}/dependency-scan.XXXXXX")"
+        echo "work-dir=${WORK_DIR}" >> "${GITHUB_OUTPUT}"
+        WORK_DIR="${WORK_DIR}" bash "${GITHUB_ACTION_PATH}/install-trivy.sh"
+
+    - name: Trivy — dependency vulnerability scan
+      id: scan
+      if: steps.install.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        TRIVY_BIN: ${{ steps.install.outputs.path }}
+        WORK_DIR: ${{ steps.install.outputs.work-dir }}
+        SCAN_PATH: ${{ inputs.scan-path }}
+        SEVERITY: ${{ inputs.severity }}
+        IGNORE_UNFIXED: ${{ inputs.ignore-unfixed }}
+        WANT_SARIF: ${{ inputs.upload-sarif }}
+        SHA: ${{ github.sha }}
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_REF: ${{ github.base_ref }}
+      run: bash "${GITHUB_ACTION_PATH}/scan.sh"
+
+    - name: Upload dependency vulnerability report artifact
+      id: upload
+      if: ${{ !cancelled() && steps.scan.outputs.report-dir != '' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: dependency-vuln-report${{ inputs.artifact-suffix }}
+        path: ${{ steps.scan.outputs.report-dir }}/dependency-vuln-report.json
+        retention-days: 7
+        if-no-files-found: error
+
+    # ── SARIF (supplementary; never changes the verdict) ─────────────────────
+    - name: Check code scanning availability
+      id: sarif-preflight
+      if: ${{ !cancelled() && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif != '' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        API_URL: ${{ github.api_url }}
+        REPO: ${{ github.repository }}
+      run: bash "${GITHUB_ACTION_PATH}/sarif-preflight.sh"
+
+    - name: Upload SARIF to GitHub Security tab
+      if: ${{ !cancelled() && steps.sarif-preflight.outputs.available == 'true' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif }}
+        category: trivy-dependencies${{ inputs.artifact-suffix }}
+        token: ${{ inputs.token }}
+
+    # ── Verdict ──────────────────────────────────────────────────────────────
+    # findings: the scan completed and found vulnerabilities at `severity`.
+    # clean:    the scan completed with none AND the report was uploaded.
+    # error:    anything else (install or scan failed, unreadable count, or no
+    #           report after a clean scan). A missing status fails closed.
+    - name: Record dependency scan verdict
+      id: verdict
+      if: always()
+      shell: bash
+      env:
+        INSTALL_OUTCOME: ${{ steps.install.outcome }}
+        SCAN_STATUS: ${{ steps.scan.outputs.status }}
+        COUNT: ${{ steps.scan.outputs.vuln-count }}
+        UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        REPORT_DIR: ${{ steps.scan.outputs.report-dir }}
+      run: |
+        [[ "${COUNT}" =~ ^[0-9]+$ ]] || COUNT=""
+        if [ "${SCAN_STATUS}" = "ok" ] && [ -n "${COUNT}" ] && [ "${COUNT}" -gt 0 ]; then
+          RESULT="findings"
+        elif [ "${SCAN_STATUS}" = "ok" ] && [ "${COUNT}" = "0" ] && [ "${UPLOAD_OUTCOME}" = "success" ]; then
+          RESULT="clean"
+        else
+          RESULT="error"
+        fi
+        REPORT=""
+        [ -n "${REPORT_DIR}" ] && REPORT="${REPORT_DIR}/dependency-vuln-report.json"
+        echo "Dependency scan result: ${RESULT} (install ${INSTALL_OUTCOME:-none}, scan ${SCAN_STATUS:-none}, vulnerabilities ${COUNT:-unknown})"
+        {
+          echo "result=${RESULT}"
+          echo "findings-count=${COUNT}"
+          echo "report-path=${REPORT}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Fail if vulnerable dependencies detected
+      if: ${{ !cancelled() && inputs.fail-on-findings != 'false' && steps.verdict.outputs.result != 'clean' }}
+      shell: bash
+      env:
+        RESULT: ${{ steps.verdict.outputs.result }}
+        COUNT: ${{ steps.verdict.outputs.findings-count }}
+        SEVERITY: ${{ inputs.severity }}
+        INSTALL_OUTCOME: ${{ steps.install.outcome }}
+        ARTIFACT: dependency-vuln-report${{ inputs.artifact-suffix }}
+      run: |
+        if [ "${RESULT}" = "findings" ]; then
+          echo "::error::${COUNT} vulnerable dependency finding(s) at ${SEVERITY}. Upgrade the packages listed in the scan step log or the '${ARTIFACT}' artifact, or accept a CVE in .trivyignore."
+        elif [ "${INSTALL_OUTCOME}" != "success" ]; then
+          echo "::error::Trivy could not be installed (see 'Install Trivy v0.70.0' above); the dependency scan did not run."
+        else
+          echo "::error::The dependency scan did not complete, or its '${ARTIFACT}' report could not be produced or uploaded; see the steps above."
+        fi
+        exit 1

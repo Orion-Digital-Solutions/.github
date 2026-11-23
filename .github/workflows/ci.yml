@@ -13,7 +13,7 @@ name: Orion CI Orchestrator (Reusable)
 #       permissions:               # union of what the jobs below request
 #         contents: write          # release-please, SBOM / container SBOM release assets
 #         pull-requests: write     # release-please Release PR
-#         security-events: write   # SARIF upload (licence, Docker lint, image scan)
+#         security-events: write   # SARIF upload (secret, dependency, licence, Docker lint, image scan)
 #         actions: read            # SARIF upload on private repos
 #         id-token: write          # SBOM attestation (sbom.yml)
 #         attestations: write      # SBOM attestation (sbom.yml)
@@ -37,8 +37,9 @@ name: Orion CI Orchestrator (Reusable)
 # ── Job graph ─────────────────────────────────────────────────────────────────
 #   fast-checks  "Fast checks": checkout → plan (normalise inputs, event
 #                gating, Sonar change detection, docs-only detection) →
-#                secret scan → licence scan (install-command, the only caller
-#                code, runs last) → fail if either scan is not clean.
+#                secret scan → dependency CVE scan → licence scan
+#                (install-command, the only caller code, runs last) → fail if
+#                any scan is not clean.
 #                Every decision about WHAT runs is made here and exported as
 #                lists + counts; downstream `if:`s read only the counts.
 #   sonarcloud   matrix over the plan's (filtered) Sonar projects
@@ -54,17 +55,18 @@ name: Orion CI Orchestrator (Reusable)
 #   does not hide the Sonar and lint results.
 #
 # ── What runs and when ────────────────────────────────────────────────────────
-#   pull_request        secret (PR delta) + licence; Sonar on CHANGED projects
+#   pull_request        secret (PR delta) + dependency CVEs + licence; Sonar on CHANGED projects
 #                       only; Docker lint; image if docker-build-image
-#   push, main branch   secret (push delta) + licence; Sonar all; Docker lint;
+#   push, main branch   secret (push delta) + dependency CVEs + licence; Sonar all; Docker lint;
 #                       image if enabled; SBOM. Never docs-only.
 #   push, other branch  as main, without SBOM; docs-only applies
-#   schedule            full-history secret scan + licence; image CVE scan only
+#   schedule            full-history secret scan + dependency CVEs + licence; image CVE scan only
 #                       if enabled. No Sonar, no Docker lint.
 #   release             SBOM; image build + SBOM publish if enabled (fast-checks
-#                       then runs the plan only). No secret/licence/Sonar/lint.
+#                       then runs the plan only). No secret/dependency/licence/Sonar/lint.
 #   Docs-only change (PR / non-main push, every changed path matches
-#   docs-only-paths): secret + licence still run; Sonar, lint, image skipped.
+#   docs-only-paths): secret, dependency and licence scans still run; Sonar,
+#   lint, image skipped.
 #
 #   Child workflows and actions are referenced with the self-repository prefix
 #   `$/`, which resolves to THIS repository at the running commit, so a caller
@@ -202,6 +204,23 @@ on:
         required: false
         type: boolean
         default: false
+
+      # ── Dependency vulnerability scan (v2, ROADMAP 7.1) ───────────────────────
+      # Trivy filesystem scan of lock files/manifests for known CVEs, in Fast
+      # checks, on every event but release. Vulnerabilities with no fixed
+      # version are ignored; accept a CVE in .trivyignore at the repository
+      # root (on PRs the base branch copy is used). A finding fails CI.
+      dependency-scan:
+        description: "Scan dependency lock files for known vulnerabilities (Trivy fs). A finding at dependency-scan-severity fails CI. Accept a CVE in .trivyignore."
+        required: false
+        type: boolean
+        default: true
+
+      dependency-scan-severity:
+        description: "Comma-separated severities that fail the dependency scan (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)"
+        required: false
+        type: string
+        default: "CRITICAL,HIGH"
 
       # ── Docs-only skip (v2) ───────────────────────────────────────────────────
       # On pull requests and on pushes to branches other than main-branch, when
@@ -344,11 +363,12 @@ permissions:
 
 jobs:
 
-  # ── Fast checks: plan + secret scan + licence scan (ROADMAP 6.3) ───────────
-  # One job, one billed minute. Step order matters: the plan and the secret
-  # scan record their outputs BEFORE the licence scan runs install-command
-  # (the only caller code), and a later step cannot change an earlier step's
-  # outputs, so the gate can trust plan counts and the secret-scan verdict.
+  # ── Fast checks: plan + secret, dependency and licence scans (6.3, 7.1) ────
+  # One job, one billed minute. Step order matters: the plan, the secret scan
+  # and the dependency scan record their outputs BEFORE the licence scan runs
+  # install-command (the only caller code), and a later step cannot change an
+  # earlier step's outputs, so the gate can trust plan counts and the secret
+  # and dependency verdicts.
   fast-checks:
     name: Fast checks
     # On release only the plan is needed, and only for the image path.
@@ -357,7 +377,7 @@ jobs:
     timeout-minutes: 30          # a scheduled full-history scan of a large repo
     permissions:
       contents: read           # checkout
-      security-events: write   # licence SARIF upload
+      security-events: write   # secret, dependency and licence SARIF upload
       actions: read            # SARIF upload reads workflow run metadata (private repos)
     outputs:
       sonar-projects: ${{ steps.plan.outputs.sonar-projects }}
@@ -373,6 +393,7 @@ jobs:
       plan-outcome:   ${{ steps.plan.outcome }}
       secret-result:  ${{ steps.secret.outputs.result }}
       licence-result: ${{ steps.licence.outputs.result }}
+      dependency-result: ${{ steps.dependency.outputs.result }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -713,6 +734,22 @@ jobs:
         with:
           full-scan: ${{ inputs.secret-scan-full-history || github.event_name == 'schedule' }}
           gitleaks-license: ${{ secrets.GITLEAKS_LICENSE }}
+          upload-sarif: "true"         # only where code scanning is available
+          fail-on-findings: "false"
+
+      # ── Dependency CVE scan (7.1) ───────────────────────────────────────
+      # BEFORE the licence scan: its verdict must be recorded before
+      # install-command runs caller code (which could otherwise tamper with
+      # the scan through $GITHUB_ENV, e.g. BASH_ENV). Trivy fs reads lock
+      # files, so it gains nothing from installed packages. Runs on docs-only
+      # changes too: a CVE published since the last run is news either way,
+      # and the step costs seconds inside a job that runs anyway.
+      - name: Dependency scan
+        id: dependency
+        if: ${{ !cancelled() && github.event_name != 'release' && inputs.dependency-scan }}
+        uses: $/.github/actions/dependency-scan
+        with:
+          severity: ${{ inputs.dependency-scan-severity }}
           fail-on-findings: "false"
 
       # ── Licence scan: LAST, because install-command runs caller code ────
@@ -725,10 +762,10 @@ jobs:
           install-command: ${{ inputs.license-install-command }}
           fail-on-findings: "false"
 
-      # The gate re-checks the two results from the job outputs, which caller
+      # The gate re-checks the results from the job outputs, which caller
       # code in install-command cannot change; this step only makes the job
       # itself red.
-      - name: Fail on secret or licence findings
+      - name: Fail on secret, dependency or licence findings
         if: ${{ !cancelled() && github.event_name != 'release' }}
         shell: bash
         env:
@@ -736,6 +773,9 @@ jobs:
           SECRET_COUNT:   ${{ steps.secret.outputs.findings-count }}
           LICENCE_RESULT: ${{ steps.licence.outputs.result }}
           LICENCE_COUNT:  ${{ steps.licence.outputs.findings-count }}
+          DEP_ENABLED:    ${{ inputs.dependency-scan }}
+          DEP_RESULT:     ${{ steps.dependency.outputs.result }}
+          DEP_COUNT:      ${{ steps.dependency.outputs.findings-count }}
         run: |
           rc=0
           if [ "${SECRET_RESULT}" != "clean" ]; then
@@ -746,7 +786,11 @@ jobs:
             echo "::error::Licence scan: ${LICENCE_RESULT:-did not run} (${LICENCE_COUNT:-unknown} violation(s)). See the 'Licence scan' step and the license-report artifact."
             rc=1
           fi
-          [ "${rc}" -eq 0 ] && echo "Secret scan and licence scan clean."
+          if [ "${DEP_ENABLED}" = "true" ] && [ "${DEP_RESULT}" != "clean" ]; then
+            echo "::error::Dependency scan: ${DEP_RESULT:-did not run} (${DEP_COUNT:-unknown} vulnerability finding(s)). See the 'Dependency scan' step and the dependency-vuln-report artifact."
+            rc=1
+          fi
+          [ "${rc}" -eq 0 ] && echo "Secret, dependency and licence scans clean."
           exit "${rc}"
 
   # ── SonarCloud (single OR monorepo, matrixed) ──────────────────────────────
@@ -988,6 +1032,14 @@ jobs:
           path: ./reports/license
         continue-on-error: true
 
+      - name: Download dependency vulnerability report
+        if: always()
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dependency-vuln-report
+          path: ./reports/dependency
+        continue-on-error: true
+
       # One artifact per image leg (docker-vuln-report-<target-id>), each in
       # its own ./reports/docker/<artifact-name>/ directory.
       - name: Download Docker vulnerability reports
@@ -1134,6 +1186,8 @@ jobs:
           PLAN_OUTCOME:    ${{ needs.fast-checks.outputs.plan-outcome }}
           SECRET_RESULT:   ${{ needs.fast-checks.outputs.secret-result }}
           LICENCE_RESULT:  ${{ needs.fast-checks.outputs.licence-result }}
+          DEP_RESULT:      ${{ needs.fast-checks.outputs.dependency-result }}
+          DEP_ENABLED:     ${{ inputs.dependency-scan }}
           SONAR_COUNT:     ${{ needs.fast-checks.outputs.sonar-count }}
           SONAR_TOTAL_CFG: ${{ needs.fast-checks.outputs.sonar-total }}
           DOCKER_TOTAL:    ${{ needs.fast-checks.outputs.docker-count }}
@@ -1173,6 +1227,7 @@ jobs:
           }
           RESULT_SECRET=$(scan_status "${SECRET_RESULT}")
           RESULT_LICENSE=$(scan_status "${LICENCE_RESULT}")
+          RESULT_DEP=$(scan_status "${DEP_RESULT}")
 
           OVERALL_PASS=true
           for r in "$RESULT_FAST" "$RESULT_SONAR" "$RESULT_LINT" "$RESULT_IMAGE" "$RESULT_PUBLISH" "$RESULT_RELEASE" "$RESULT_SBOM"; do
@@ -1227,6 +1282,21 @@ jobs:
             fi
           fi
 
+          DEP_FILE="./reports/dependency/dependency-vuln-report.json"
+          if   [ "${DEP_ENABLED}" != "true" ];     then RESULT_DEP=skipped; DD="Skipped — dependency-scan is off"
+          elif [ "$RESULT_DEP" = "skipped" ];      then DD="Skipped (release event)"
+          elif [ "${DEP_RESULT}" = "error" ];      then DD="Scan did not complete — see the Dependency scan step"
+          elif [ ! -f "$DEP_FILE" ];               then DD="Report artifact unavailable"
+          else
+            DN=$(jq '.meta.vulnerability_count // 0' "$DEP_FILE" 2>/dev/null || echo 0)
+            DS=$(jq -r '.meta.severity_filter // "CRITICAL,HIGH"' "$DEP_FILE" 2>/dev/null || echo "CRITICAL,HIGH")
+            DT=$(jq '.meta.targets_scanned // 0' "$DEP_FILE" 2>/dev/null || echo 0)
+            DB=$(jq -r '(.meta.by_severity // {}) | to_entries | map("\(.value) \(.key | ascii_downcase)") | join(", ")' "$DEP_FILE" 2>/dev/null || echo "")
+            if [ "${DN:-0}" -gt 0 ] 2>/dev/null; then DD="${DN} vulnerable dependency finding(s) at ${DS} (${DB}) — see the dependency-vuln-report artifact"
+            else DD="No vulnerabilities at ${DS} (${DT} lock file(s) or manifest(s) scanned)"
+            fi
+          fi
+
           if   [ "$RESULT_RELEASE" = "skipped" ];                              then RD="Skipped"
           elif [ "${RELEASE_CREATED:-}" = "true" ] && [ -n "${RELEASE_TAG:-}" ]; then RD="Released ${RELEASE_TAG}"
           elif [ "${RELEASE_CREATED:-}" = "true" ];                            then RD="Released (manifest — multiple packages)"
@@ -1275,6 +1345,7 @@ jobs:
             echo "|-------|--------|---------|"
             echo "| 🧭 Fast checks (plan) | $(status_icon "$RESULT_FAST") | ${PD} |"
             echo "| 🔐 Secret Scanning | $(status_icon "$RESULT_SECRET") | ${SD} |"
+            echo "| 🧬 Dependency vulnerabilities | $(status_icon "$RESULT_DEP") | ${DD} |"
             echo "| ⚖️ License Compliance | $(status_icon "$RESULT_LICENSE") | ${LD} |"
             echo "| 🔍 SonarCloud | $(status_icon "$RESULT_SONAR") | ${SND} |"
             echo "| 🐳 Dockerfile lint | $(status_icon "$RESULT_LINT") | ${LND} |"
@@ -1912,7 +1983,8 @@ jobs:
       # recorded before any caller code ran), never from the report above.
       #   fail: any needed job failure/cancelled;
       #         fast-checks skipped on a non-release event;
-      #         fast-checks green but a scan verdict not clean (belt and braces:
+      #         fast-checks green but a scan verdict (secret, licence and,
+      #         when enabled, dependency) not clean (belt and braces:
       #         caller code in install-command could only have neutralised
       #         the job's own failing step, not these outputs).
       #   pass: everything else, including jobs the plan gated off (skipped).
@@ -1930,6 +2002,8 @@ jobs:
           R_SBOM:         ${{ needs.sbom.result }}
           SECRET_RESULT:  ${{ needs.fast-checks.outputs.secret-result }}
           LICENCE_RESULT: ${{ needs.fast-checks.outputs.licence-result }}
+          DEP_ENABLED:    ${{ inputs.dependency-scan }}
+          DEP_RESULT:     ${{ needs.fast-checks.outputs.dependency-result }}
         run: |
           set -u
           FAIL=0
@@ -1947,7 +2021,9 @@ jobs:
               echo "::error::Fast checks was skipped on a '${EVENT}' event; it must always run."
               FAIL=1
             elif [ "${R_FAST}" = "success" ]; then
-              for pair in "Secret scan=${SECRET_RESULT}" "Licence scan=${LICENCE_RESULT}"; do
+              CHECKS=("Secret scan=${SECRET_RESULT}" "Licence scan=${LICENCE_RESULT}")
+              [ "${DEP_ENABLED}" = "true" ] && CHECKS+=("Dependency scan=${DEP_RESULT}")
+              for pair in "${CHECKS[@]}"; do
                 if [ "${pair#*=}" != "clean" ]; then
                   echo "::error::${pair%%=*}: '${pair#*=}' (expected 'clean') although Fast checks succeeded."
                   FAIL=1

@@ -20,6 +20,22 @@ description: >-
 # Uploads `gitleaks-report<artifact-suffix>` (JSON) after every scan. The CI
 # orchestrator report reads this artifact to render findings.
 #
+# ── SARIF (ROADMAP 7.2) ──────────────────────────────────────────────────────
+# With upload-sarif 'true' and code scanning available (probed first; public
+# repositories on the Team plan), the findings are also uploaded to the
+# Security tab, category `gitleaks<artifact-suffix>`. The calling job then
+# needs security-events: write and actions: read. The SARIF is built from the
+# JSON report with jq (Gitleaks writes one report format per run, and a second
+# scan could disagree with the verdict). It carries rule, file, lines, commit
+# and fingerprint only, never the Secret, Match or Line fields; those are
+# already "REDACTED" by --redact (v8.30.1 detect/utils.go filter() redacts
+# every finding before any reporter, SARIF included, sees it).
+# Uploaded only for complete views of the repository: full-history scans and
+# pull-request diffs (compared by GitHub against the base branch). A push
+# delta is skipped: an upload replaces the branch's previous analysis, so a
+# clean delta would mark every alert from history scans as fixed.
+# SARIF steps are continue-on-error and never change the verdict.
+#
 # ── Custom rules ─────────────────────────────────────────────────────────────
 # Place a .gitleaks.toml file in the calling repository root to extend or
 # override rules (e.g. to allowlist known false positives).
@@ -66,6 +82,16 @@ inputs:
     description: "'true' (default): the last step fails when `result` is not clean (findings or error). 'false': never fail; read the `result` output instead."
     required: false
     default: "true"
+
+  upload-sarif:
+    description: "'true': upload findings as SARIF (category `gitleaks`) when code scanning is available (probed first); the job needs security-events: write and actions: read. Default 'false' so callers without that scope get no probe warning."
+    required: false
+    default: "false"
+
+  token:
+    description: "Token for the code-scanning availability check and the SARIF upload (composite actions cannot read secrets.GITHUB_TOKEN)."
+    required: false
+    default: ${{ github.token }}
 
 outputs:
   result:
@@ -351,6 +377,95 @@ runs:
             },
             findings: $findings[0]
           }' > gitleaks-full-report.json
+
+    # ── SARIF (supplementary; see the header) ────────────────────────────────
+    # Built only from a complete scan (exit 0 or 2) of a full history or a PR
+    # diff. Region lines are clamped to >= 1 (code scanning rejects 0).
+    - name: Build Gitleaks SARIF
+      id: sarif
+      if: >-
+        ${{ !cancelled() && inputs.upload-sarif == 'true'
+            && steps.scan.outcome == 'success'
+            && (steps.scan.outputs.gitleaks_exit == '0' || steps.scan.outputs.gitleaks_exit == '2') }}
+      continue-on-error: true
+      shell: bash
+      env:
+        SCAN_TYPE:        ${{ steps.range.outputs.scan_type }}
+        GITLEAKS_VERSION: ${{ inputs.gitleaks-version }}
+      run: |
+        set -euo pipefail
+        case "${SCAN_TYPE}" in
+          full-history|pr-diff) ;;
+          *)
+            echo "::notice::Gitleaks SARIF not uploaded for a '${SCAN_TYPE}' scan: it covers only the pushed commits, and replacing the branch's analysis with it would close alerts found by full-history scans."
+            exit 0
+            ;;
+        esac
+        SARIF="${RUNNER_TEMP}/gitleaks.sarif"
+        jq --arg version "${GITLEAKS_VERSION#v}" '
+          def line($n): (($n // 1) | if type == "number" and . >= 1 then floor else 1 end);
+          (if type == "array" then . else [] end) as $f
+          | {
+              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+              version: "2.1.0",
+              runs: [{
+                tool: {driver: {
+                  name: "gitleaks",
+                  informationUri: "https://github.com/gitleaks/gitleaks",
+                  version: $version,
+                  rules: ($f | map({id: (.RuleID // "unknown"), d: (.Description // .RuleID // "secret")})
+                             | unique_by(.id)
+                             | map({id, name: .id,
+                                    shortDescription: {text: .d},
+                                    properties: {tags: ["security", "secret"]}}))
+                }},
+                results: ($f | map(
+                  line(.StartLine) as $start
+                  | {
+                      ruleId: (.RuleID // "unknown"),
+                      level: "error",
+                      message: {text: "\(.RuleID // "unknown"): \(.Description // "possible secret") in \(.File // "unknown file")\(if (.Commit // "") != "" then " at commit \(.Commit[0:7])" else "" end). The value is redacted; see the gitleaks-report artifact."},
+                      locations: [{physicalLocation: {
+                        artifactLocation: {uri: (.File // "unknown")},
+                        region: {startLine: $start, endLine: ([line(.EndLine), $start] | max)}
+                      }}],
+                      partialFingerprints: {"gitleaksFingerprint/v1": (if (.Fingerprint // "") != "" then .Fingerprint
+                                                                       else "\(.Commit // ""):\(.File // ""):\(.RuleID // ""):\($start)" end)}
+                    }))
+              }]
+            }' gitleaks-report.json > "${SARIF}"
+        echo "Gitleaks SARIF: $(jq '.runs[0].results | length' "${SARIF}") result(s)."
+        echo "path=${SARIF}" >> "$GITHUB_OUTPUT"
+
+    - name: Check code scanning availability
+      id: code-scanning-preflight
+      if: ${{ !cancelled() && steps.sarif.outputs.path != '' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        API_URL:  ${{ github.api_url }}
+        REPO:     ${{ github.repository }}
+      run: |
+        HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "${API_URL}/repos/${REPO}/code-scanning/alerts?per_page=1" || true)
+        if [ "${HTTP_CODE}" = "200" ]; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::Gitleaks SARIF upload skipped: code scanning unavailable (HTTP ${HTTP_CODE:-none})."
+          echo "available=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Upload Gitleaks SARIF to GitHub Security tab
+      if: ${{ !cancelled() && steps.code-scanning-preflight.outputs.available == 'true' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ steps.sarif.outputs.path }}
+        category:   gitleaks${{ inputs.artifact-suffix }}
+        token:      ${{ inputs.token }}
 
     # ── Upload report artifact ───────────────────────────────────────────────
     - name: Upload Gitleaks report artifact
