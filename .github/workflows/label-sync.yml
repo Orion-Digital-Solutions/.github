@@ -69,7 +69,7 @@ jobs:
       # Check out THIS .github repo to get the canonical labels.yml.
       # The calling project repo's code is NOT needed for this workflow.
       - name: Checkout orion-digital-solutions/.github (labels source)
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           repository: orion-digital-solutions/.github
@@ -78,8 +78,12 @@ jobs:
           sparse-checkout: labels.yml
           sparse-checkout-cone-mode: false
 
+      # Kept on v2.3.3 (last release, February 2024; ROADMAP 3.7). Its
+      # action.yml declares `using: node20`, a removed runtime, so the runner
+      # remaps it to Node 24. Replace it with a `gh label` script if that
+      # remap ever stops.
       - name: Sync labels to ${{ github.repository }}
-        uses: EndBug/label-sync@v2
+        uses: EndBug/label-sync@52074158190acb45f3077f9099fea818aa43f97a # v2.3.3
         with:
           # A local path; `source` is not an input of this action and was ignored.
           # The leading ./ matters: the action's isURL() regex treats a bare

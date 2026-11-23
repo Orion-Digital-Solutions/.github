@@ -12,6 +12,11 @@ updates:
     schedule:
       interval: weekly
       day: monday
+    # Wait 7 days after a release before proposing it, so a hijacked or
+    # broken release is usually caught before we pin it. github-actions
+    # supports `default-days` only (no per-semver cooldowns).
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: ci
