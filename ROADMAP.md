@@ -32,14 +32,18 @@ Drafted 23 November 2026 from a review of every workflow in this repository, che
 
 ## Status
 
+Updated 23 November 2026.
+
 | Phase | State |
 |---|---|
+| 0 | Settings for an org owner. Commands (PowerShell) were handed over; apply 0.1-0.6 if not done. With the `protect-main` ruleset, every PR needs a second approver. |
 | 1 | Done: [#14](https://github.com/Orion-Digital-Solutions/.github/pull/14). |
 | 2 | Done: [#16](https://github.com/Orion-Digital-Solutions/.github/pull/16) ([#15](https://github.com/Orion-Digital-Solutions/.github/pull/15) was closed and replaced by #16). Item 5.1 (relative child references) was done early, in this phase. |
 | 3 | Done: [#18](https://github.com/Orion-Digital-Solutions/.github/pull/18). Hadolint is held at v3.1.0 (Hadolint 2.12) for `v1`; see 3.6. |
 | 4 | Done: [#20](https://github.com/Orion-Digital-Solutions/.github/pull/20). The sandbox caller (4.3) is [`Orion-Digital-Solutions/ci-sandbox`](https://github.com/Orion-Digital-Solutions/ci-sandbox). |
-| 5 | 5.4 and 5.5 are prepared in one pull request (templates and README at `@v1`, [MIGRATION.md](MIGRATION.md)), which also carries 6.7 and 6.10. It is held until an org owner creates the `v1.0.0` and `v1` tags (5.3), because templates pointing at a missing tag would break new callers. |
-| 6 | In progress on a separate branch. It is **not merged to `main` until callers are on `@v1`**: `v2` changes status-check names, and `main` is what the 18 callers run today. |
+| 5 | Released: [v1.0.0](https://github.com/Orion-Digital-Solutions/.github/releases/tag/v1.0.0) (Phases 1-4) and [v1.0.1](https://github.com/Orion-Digital-Solutions/.github/releases/tag/v1.0.1) ([#21](https://github.com/Orion-Digital-Solutions/.github/pull/21): `@v1` docs, [MIGRATION.md](MIGRATION.md), template items 6.7 and 6.10). Open: 5.2 tag ruleset (org owner), caller migration (owners of the 18 repos), then 5.6 org token default to read-only. |
+| 6 | Built and validated in the sandbox on draft [#22](https://github.com/Orion-Digital-Solutions/.github/pull/22) (`ci/v2-dev`): full run 16 → 6 billed minutes, docs-only PR 2. **Not merged until callers are on `@v1`** (check names change). Before release: test SonarCloud change detection from one real monorepo caller, then tag `v2.0.0`/`v2`. 6.11 (`ubuntu-slim` light runner) not done: optional. |
+| 7 | 7.1-7.3 on draft #22 (dependency CVE scan, Gitleaks SARIF, isolated Sonar coverage), validated including a failing-gate test. 7.4-7.5 done: [#23](https://github.com/Orion-Digital-Solutions/.github/pull/23) (OpenSSF Scorecard, Dependabot-secrets note). 7.6 (attestations on private repos) not available on the Team plan. |
 
 ## Release plan in one view
 
