@@ -2,9 +2,12 @@ name: SBOM Generation (Reusable)
 
 # Reusable workflow — generates a Software Bill of Materials (SBOM) using Syft.
 #
-# Caller usage:
+# Caller usage (no secrets needed; the calling job must grant at least these):
+#   permissions:
+#     contents: write
+#     id-token: write
+#     attestations: write
 #   uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
-#   secrets: inherit
 #
 # ── What is an SBOM? ─────────────────────────────────────────────────────────
 # An SBOM is a machine-readable inventory of every library, framework, and
@@ -71,19 +74,26 @@ on:
         type: string
         default: "ubuntu-latest"
 
+# Default for any job without its own block: read-only.
 permissions:
-  contents: write        # upload to GitHub Release assets
-  id-token: write        # Sigstore OIDC attestation (only used when attest: true)
-  attestations: write    # store signed attestation
+  contents: read
 
 jobs:
   sbom:
     name: Generate SBOM
     runs-on: ${{ inputs.runner }}
+    # contents: write only to attach SBOMs to a release; id-token/attestations
+    # are only used when attest: true (Sigstore OIDC signing + attestation store).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       # ── Generate SPDX JSON SBOM ──────────────────────────────────────────
       - name: Generate SBOM — SPDX JSON
@@ -118,16 +128,23 @@ jobs:
           sbom-path:    ${{ inputs.artifact-name }}.spdx.json
 
       # ── Print summary ────────────────────────────────────────────────────
+      # Expressions go through env: (never pasted into the script) so values
+      # such as a crafted release tag name cannot inject shell code.
       - name: SBOM summary
         shell: bash
+        env:
+          ARTIFACT_NAME:     ${{ inputs.artifact-name }}
+          ATTACH_TO_RELEASE: ${{ inputs.attach-to-release }}
+          EVENT_NAME:        ${{ github.event_name }}
+          REF_NAME:          ${{ github.ref_name }}
         run: |
           echo "### SBOM Generated" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "| Format | File |" >> "$GITHUB_STEP_SUMMARY"
           echo "|--------|------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| SPDX JSON | \`${{ inputs.artifact-name }}.spdx.json\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| CycloneDX JSON | \`${{ inputs.artifact-name }}.cyclonedx.json\` |" >> "$GITHUB_STEP_SUMMARY"
-          if [ "${{ inputs.attach-to-release }}" = "true" ] && [ "${{ github.event_name }}" = "release" ]; then
+          echo "| SPDX JSON | \`${ARTIFACT_NAME}.spdx.json\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| CycloneDX JSON | \`${ARTIFACT_NAME}.cyclonedx.json\` |" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${ATTACH_TO_RELEASE}" = "true" ] && [ "${EVENT_NAME}" = "release" ]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "Both files attached to GitHub Release **${{ github.ref_name }}**." >> "$GITHUB_STEP_SUMMARY"
+            echo "Both files attached to GitHub Release **${REF_NAME}**." >> "$GITHUB_STEP_SUMMARY"
           fi

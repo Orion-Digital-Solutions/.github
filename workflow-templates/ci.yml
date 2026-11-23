@@ -25,6 +25,19 @@ on:
     # Weekly full-history secret + license scan (Monday 06:00 UTC)
     - cron: "0 6 * * 1"
 
+# Token permissions: the maximum the shared orchestrator requests. GitHub
+# validates these at start-up even for jobs that are skipped (e.g. Release
+# Please is disabled but still needs pull-requests: write declared), and each
+# shared job narrows them further. Required once the org default token is
+# read-only — without this block the run fails before any job starts.
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: write
+  actions: read
+  id-token: write
+  attestations: write
+
 jobs:
   ci:
     name: Orion CI
@@ -121,4 +134,9 @@ jobs:
       # main-branch: "main"
       # forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
       # secret-scan-full-history: false
-    secrets: inherit
+    # Pass only the org secrets the orchestrator uses (never `secrets: inherit`).
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}

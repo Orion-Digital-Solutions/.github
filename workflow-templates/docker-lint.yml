@@ -69,6 +69,16 @@ on:
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
 
+# Token permissions: the maximum the shared workflow requests. GitHub
+# validates these at start-up even for jobs that are skipped, and each shared
+# job narrows them further (the job that builds the image is read-only).
+permissions:
+  contents: write
+  security-events: write
+  actions: read
+  id-token: write
+  attestations: write
+
 jobs:
   docker-lint:
     name: Docker Best Practices
@@ -119,4 +129,5 @@ jobs:
       # ── Reporting ──────────────────────────────────────────────────────────
       upload-sarif: true                  # upload findings to GitHub Security tab
       artifact-retention-days: 7
-    secrets: inherit
+    secrets:
+      AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}

@@ -3,11 +3,13 @@ name: Release Please (Reusable)
 # Reusable workflow — automated versioning, changelogs, and GitHub Releases
 # using Release Please (Google).
 #
-# Caller usage:
+# Caller usage (no secrets needed; the calling job must grant at least these):
+#   permissions:
+#     contents: write
+#     pull-requests: write
 #   uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
 #   with:
 #     release-type: python
-#   secrets: inherit
 #
 # ── How it works ─────────────────────────────────────────────────────────────
 # Every push to the target branch (default: main) that contains Conventional
@@ -149,15 +151,18 @@ on:
         description: "JSON array of package paths released this run (manifest mode; empty otherwise)"
         value: ${{ jobs.release-please.outputs.paths-released }}
 
+# Default for any job without its own block: read-only.
 permissions:
-  contents: write       # create tags and GitHub Releases
-  pull-requests: write  # open and update Release PRs
+  contents: read
 
 jobs:
   # ── Step 1: Create / update the Release PR ──────────────────────────────────
   release-please:
     name: Release Please
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: write       # create tags and GitHub Releases
+      pull-requests: write  # open and update Release PRs
 
     outputs:
       # Single-package (release-type) and manifest modes expose different outputs;
@@ -201,11 +206,14 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release-created == 'true'
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: write       # attach SBOMs to the release as assets
 
     steps:
       - name: Checkout tag
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           ref: ${{ needs.release-please.outputs.tag-name }}
           fetch-depth: 0
 

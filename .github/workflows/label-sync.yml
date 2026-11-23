@@ -3,9 +3,11 @@ name: Label Sync (Reusable)
 # Reusable workflow — synchronizes the canonical Orion label set to the
 # calling repository using EndBug/label-sync.
 #
-# Caller usage:
+# Caller usage (no secrets needed; the calling job must grant at least these):
+#   permissions:
+#     contents: read
+#     issues: write
 #   uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@main
-#   secrets: inherit
 #
 # ── What it does ─────────────────────────────────────────────────────────────
 # 1. Checks out orion-digital-solutions/.github to read labels.yml.
@@ -17,9 +19,10 @@ name: Label Sync (Reusable)
 #
 # ── Token requirements ────────────────────────────────────────────────────────
 # The GITHUB_TOKEN of the calling repository requires `issues: write`
-# permission (labels are part of the Issues API).  This is declared in the
-# permissions block below and inherited automatically when `secrets: inherit`
-# is used.
+# permission (labels are part of the Issues API).  This is declared on the
+# job below, but a called workflow can never exceed its caller, so the
+# calling job must also grant `issues: write` (see Caller usage above).
+# No secrets need to be passed: GITHUB_TOKEN is always available.
 #
 # ── Org-wide bootstrap ────────────────────────────────────────────────────────
 # To apply the canonical label set to every org repository in one pass, run
@@ -49,13 +52,18 @@ on:
         type: string
         default: "ubuntu-latest"
 
+# Default for any job without its own block: read-only.
 permissions:
-  issues: write
+  contents: read
 
 jobs:
   sync:
     name: Sync Labels
     runs-on: ${{ inputs.runner }}
+    # contents: read for the labels.yml checkout; issues: write to manage labels.
+    permissions:
+      contents: read
+      issues: write
 
     steps:
       # Check out THIS .github repo to get the canonical labels.yml.
@@ -63,6 +71,7 @@ jobs:
       - name: Checkout orion-digital-solutions/.github (labels source)
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           repository: orion-digital-solutions/.github
           ref: main
           sparse-checkout: labels.yml

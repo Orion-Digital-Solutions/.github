@@ -2,11 +2,14 @@ name: License Compliance (Reusable)
 
 # Reusable workflow — scans dependencies for OSS license compliance using Trivy.
 #
-# Caller usage:
+# Caller usage (no secrets needed; the calling job must grant at least these):
+#   permissions:
+#     contents: read
+#     security-events: write
+#     actions: read
 #   uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
 #   with:
 #     forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
-#   secrets: inherit
 #
 # ── Why this matters ──────────────────────────────────────────────────────────
 # As a consulting firm delivering software to enterprise clients, GPL/AGPL
@@ -56,19 +59,26 @@ on:
         type: string
         default: "ubuntu-latest"
 
+# Default for any job without its own block: read-only.
 permissions:
   contents: read
-  security-events: write
-  actions: read
 
 jobs:
   license-check:
     name: OSS License Compliance
     runs-on: ${{ inputs.runner }}
+    # security-events: write to upload SARIF to code scanning; actions: read
+    # lets upload-sarif read workflow run metadata (needed on private repos).
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       # ── Build Trivy config from inputs ───────────────────────────────────
       - name: Prepare Trivy license config

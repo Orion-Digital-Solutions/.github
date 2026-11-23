@@ -1,0 +1,21 @@
+# Dependabot keeps the actions used by the shared workflows current.
+#
+# Note: for the github-actions ecosystem Dependabot only scans
+# .github/workflows/ in this repository. The starter templates in
+# workflow-templates/ are NOT scanned, so any action pins there (and the
+# reference to the shared workflows themselves) must be updated by hand
+# whenever the shared workflows are bumped.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    groups:
+      github-actions:
+        patterns:
+          - "*"
