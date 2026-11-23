@@ -2,7 +2,8 @@
 
 actionlint skips input validation for SHA-pinned actions, so this fills the gap:
 for each step `uses: owner/repo[/path]@<sha>` it fetches action.yml at that SHA
-(via `gh api`, so GH_TOKEN must be set) and reports
+(anonymously from raw.githubusercontent.com, falling back to `gh api` with
+GH_TOKEN for private actions) and reports
 
   - UNKNOWN INPUT     a `with:` key the action does not declare
   - MISSING REQUIRED  a required input with no default that is not passed
@@ -21,6 +22,8 @@ import functools
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 import yaml
 
@@ -28,11 +31,31 @@ SHA = re.compile(r"^[0-9a-f]{40}$")
 OWN_ORG = "orion-digital-solutions"
 
 
+def _fetch_raw(owner_repo, path, ref):
+    """Anonymous fetch from raw.githubusercontent.com.
+
+    Used first because organisations with an IP allow list (e.g. aquasecurity,
+    bridgecrewio) reject authenticated API calls from GitHub-hosted runner IPs
+    with HTTP 403, while their public files stay readable anonymously.
+    """
+    url = f"https://raw.githubusercontent.com/{owner_repo}/{ref}/{path}"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 (fixed https host)
+            return resp.read().decode("utf-8")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return exc
+
+
 @functools.lru_cache(maxsize=None)
 def action_inputs(owner_repo, subpath, ref):
     errors = []
     for name in ("action.yml", "action.yaml"):
         path = f"{subpath}/{name}" if subpath else name
+        raw = _fetch_raw(owner_repo, path, ref)
+        if isinstance(raw, str):
+            return (yaml.safe_load(raw) or {}).get("inputs") or {}
+        errors.append(f"raw: {raw}")
+        # Fallback for private actions: the API with GH_TOKEN.
         r = subprocess.run(
             ["gh", "api", f"repos/{owner_repo}/contents/{path}?ref={ref}",
              "-H", "Accept: application/vnd.github.raw"],
