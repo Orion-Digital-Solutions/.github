@@ -1,0 +1,2 @@
+# Local Claude Code settings (machine-specific paths; never commit)
+.claude/settings.local.json

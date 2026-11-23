@@ -99,6 +99,16 @@ on:
   schedule:
     - cron: "0 6 * * 1"   # weekly full-history scan, Monday 06:00 UTC
 
+# Maximum the orchestrator requests; each shared job narrows further.
+# Required — see "Workflow permissions" below.
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: write
+  actions: read
+  id-token: write
+  attestations: write
+
 jobs:
   ci:
     name: Orion CI
@@ -106,10 +116,16 @@ jobs:
     with:
       sonar-project-key: orion-digital-solutions_YOUR-REPO-NAME   # ← change this
       release-type: python                                          # ← change or remove
-    secrets: inherit
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}
 ```
 
 Replace `YOUR-REPO-NAME` with your GitHub repository name (lowercase, hyphens). See [SonarCloud Setup](#sonarcloud-setup-per-repository) for creating the project key.
+
+Keep the `permissions:` block and pass secrets by name as shown — do **not** use `secrets: inherit`, which hands every org secret to the shared workflows. A secret that is not set at org or repo level is simply passed as empty.
 
 ### Step 2 — Set your release type
 
@@ -162,12 +178,15 @@ You may use two physically different tokens in SonarCloud (best for least privil
 | Secret | Required | Description |
 |--------|----------|-------------|
 | `GITLEAKS_LICENSE` | No | Gitleaks Pro license key. Unlocks additional secret detection rules. Leave unset to use the free ruleset. |
+| `AZURE_NPM_TOKEN` | No | Read-only token for the private Azure Artifacts npm feed. Passed to the Docker image build as a BuildKit secret, only when the build pulls private npm packages. |
 
 ### Workflow permissions
 
-Navigate to **GitHub → Organization Settings → Actions → General → Workflow permissions** and set to **"Read and write permissions"**.
+Navigate to **GitHub → Organization Settings → Actions → General → Workflow permissions** and set to **"Read repository contents and packages permissions"** (read-only).
 
-This is required for `release-please` to open Release PRs and create GitHub Releases.
+Do **not** grant "Read and write" org-wide. Instead, every workflow declares the token permissions it needs in its own `permissions:` block, as the [starter templates](workflow-templates/) do. A reusable workflow can never receive more than its caller grants, so each template lists the maximum its shared workflow requests (for example `contents: write` and `pull-requests: write` for Release Please), and each shared job narrows that further.
+
+> **Callers without a `permissions:` block will fail once the default is read-only.** The shared workflows request write scopes (`contents`, `pull-requests`, `security-events`, `id-token`, `attestations`), and GitHub rejects the run at start-up if the caller does not grant them — even for jobs that would be skipped. Copy the `permissions:` block from the matching template before the org default is switched.
 
 ### SonarCloud organization
 
@@ -321,8 +340,14 @@ with:
   docker-targets: >-
     [{"dockerfile":"apps/web/Dockerfile","context":"apps/web"},
      {"dockerfile":"apps/api/Dockerfile","context":"apps/api"}]
-secrets: inherit
+secrets:
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+  GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+  AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}
 ```
+
+(Fragment of the `ci` job — keep the workflow-level `permissions:` block from [Step 1](#step-1--create-the-workflow-file).)
 
 **Rules:** the scalar (`sonar-project-key` / `dockerfile`) and its list counterpart
 (`sonar-projects` / `docker-targets`) are mutually exclusive — passing both fails the
@@ -354,18 +379,22 @@ project's check (e.g. `SonarCloud (…-web)`, `SonarCloud (…-api)`) as require
 
 ### Using Individual Workflows
 
-If you need only one pipeline rather than the full suite, call the reusable workflows directly.
+If you need only one pipeline rather than the full suite, call the reusable workflows directly. Each example shows the workflow-level `permissions:` block and the named secrets that workflow needs (see [Workflow permissions](#workflow-permissions)); the matching file in [`workflow-templates/`](workflow-templates/) has the same blocks.
 
 #### Secret scanning only
 
 ```yaml
+permissions:
+  contents: read
+
 jobs:
   secrets:
     uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@main
     with:
       full-scan: false               # true = full history, false = delta (default)
       gitleaks-version: "v8.18.4"   # optional — pin a specific version
-    secrets: inherit
+    secrets:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 ```
 
 Add a `.gitleaks.toml` file to your repository root to allowlist known false positives.
@@ -375,13 +404,21 @@ Add a `.gitleaks.toml` file to your repository root to allowlist known false pos
 When you are **not** using the full orchestrator, you can call the shared Docker pipeline directly (you must pass a `dockerfile` path):
 
 ```yaml
+permissions:
+  contents: write
+  security-events: write
+  actions: read
+  id-token: write
+  attestations: write
+
 jobs:
   docker:
     uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
     with:
       dockerfile: Dockerfile
       image-name: myapp:ci
-    secrets: inherit
+    secrets:
+      AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}   # only used when building the image
 ```
 
 The orchestrator already includes Dockerfile detection and this workflow; use the standalone call only for repos that want Docker checks without the rest of Orion CI.
@@ -391,6 +428,9 @@ The orchestrator already includes Dockerfile detection and this workflow; use th
 Uses **`SONAR_TOKEN`** only (analysis). It does **not** use `SONAR_ISSUE_RETRIEVAL`; that secret exists for the full orchestrator’s **CI Report** Summary only.
 
 ```yaml
+permissions:
+  contents: read
+
 jobs:
   sonar:
     uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
@@ -400,43 +440,61 @@ jobs:
       python-coverage-report: "coverage.xml"          # optional
       js-coverage-report: "coverage/lcov.info"        # optional (JS/TS)
       fail-on-quality-gate: true                      # default
-    secrets: inherit
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 ```
 
 #### License compliance only
 
+No secrets are needed.
+
 ```yaml
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 jobs:
   license:
     uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
     with:
       forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"   # optional override
-    secrets: inherit
 ```
 
-With default inputs, findings are also sent to the repository **Security → Code scanning** view via SARIF upload (the reusable workflow declares the permissions it needs).
+With default inputs, findings are also sent to the repository **Security → Code scanning** view via SARIF upload (this is why the caller grants `security-events: write`).
 
 #### SBOM generation only
 
+No secrets are needed.
+
 ```yaml
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
 jobs:
   sbom:
     uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
     with:
       attach-to-release: true   # attach to GitHub Release assets (default)
       attest: false             # sign with Sigstore (optional)
-    secrets: inherit
 ```
 
 #### Release Please only
 
+No secrets are needed.
+
 ```yaml
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   release:
     uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       release-type: python    # required
-    secrets: inherit
 ```
 
 #### Chaining release outputs to a deploy job
@@ -444,12 +502,15 @@ jobs:
 `release-please` exposes outputs you can use to trigger downstream jobs:
 
 ```yaml
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   release:
     uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       release-type: python
-    secrets: inherit
 
   deploy:
     needs: release
@@ -610,7 +671,11 @@ uses: orion-digital-solutions/.github/.github/workflows/ci.yml@main
 with:
   sonar-project-key: orion-digital-solutions_my-repo
   forbidden-licenses: "GPL-3.0,AGPL-3.0"   # narrower than the org default
-secrets: inherit
+secrets:
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+  GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+  AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}
 ```
 
 ### Gitleaks allowlist (per repository)

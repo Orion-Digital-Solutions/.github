@@ -15,6 +15,12 @@ on:
         type: boolean
         default: false
 
+# Token permissions: the maximum the shared workflow requests. GitHub
+# validates these at start-up, and each shared job narrows them further.
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   labels:
     name: Label Sync
@@ -23,4 +29,3 @@ jobs:
       # Set to true only if you want a strict sync that removes any labels
       # that are not in the org canonical set.  Defaults to false (additive).
       delete-other-labels: ${{ inputs.delete-other-labels || false }}
-    secrets: inherit

@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Token permissions: the maximum the shared workflow requests. GitHub
+# validates these at start-up, and each shared job narrows them further.
+permissions:
+  contents: read
+
 jobs:
   sonarcloud:
     name: SonarCloud
@@ -22,4 +27,5 @@ jobs:
       # python-coverage-report: "coverage.xml"
       # js-coverage-report: "coverage/lcov.info"
       # fail-on-quality-gate: true       # default true in reusable workflow
-    secrets: inherit
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

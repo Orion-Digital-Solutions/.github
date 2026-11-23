@@ -10,7 +10,21 @@ name: Orion CI Orchestrator (Reusable)
 #     with:
 #       sonar-project-key: orion-digital-solutions_my-repo
 #       release-type: python
-#     secrets: inherit
+#     secrets:
+#       SONAR_TOKEN:           ${{ secrets.SONAR_TOKEN }}
+#       SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
+#       GITLEAKS_LICENSE:      ${{ secrets.GITLEAKS_LICENSE }}
+#       AZURE_NPM_TOKEN:       ${{ secrets.AZURE_NPM_TOKEN }}
+#
+#   The calling job must also grant the union of the permissions the jobs
+#   below request (a called workflow can never get more than its caller):
+#     permissions:
+#       contents: write          # release-please, SBOM / docker SBOM release assets
+#       pull-requests: write     # release-please Release PR
+#       security-events: write   # SARIF upload (license, docker)
+#       actions: read            # SARIF upload on private repos
+#       id-token: write          # build-provenance attestations
+#       attestations: write      # build-provenance attestations
 #
 #   Monorepo (multiple Sonar projects / Dockerfiles in one repo): pass the list
 #   inputs `sonar-projects` and/or `docker-targets` instead of the scalars above.
@@ -286,6 +300,14 @@ on:
       GITLEAKS_LICENSE:
         description: "Gitleaks Pro license key (optional)"
         required: false
+      AZURE_NPM_TOKEN:
+        description: "Read-only npm registry token mounted as a BuildKit secret when docker-build-image is true"
+        required: false
+
+# Least privilege by default: every job reads only. Jobs that call a reusable
+# workflow raise this to exactly what that workflow's jobs request.
+permissions:
+  contents: read
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 1 — Parallel security & quality scans
@@ -295,6 +317,9 @@ jobs:
 
   secret-scan:
     name: Secret Scanning
+    # read-only: Gitleaks only reads the checkout
+    permissions:
+      contents: read
     uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@main
     with:
       full-scan: ${{ inputs.secret-scan-full-history || github.event_name == 'schedule' }}
@@ -315,6 +340,9 @@ jobs:
       fail-fast: false              # one project's gate failing must not cancel the others
       matrix:
         proj: ${{ fromJSON(needs.plan.outputs.sonar-projects) }}
+    # read-only: PR decoration uses SONAR_TOKEN, not the GitHub token
+    permissions:
+      contents: read
     uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
     with:
       project-key:            ${{ matrix.proj.key }}
@@ -335,11 +363,15 @@ jobs:
   license-check:
     name: License Compliance
     if: github.event_name != 'release'
+    # security-events/actions only for uploading the Trivy license SARIF
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
     uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
     with:
       forbidden-licenses: ${{ inputs.forbidden-licenses }}
       runner:             ${{ inputs.runner }}
-    secrets: inherit
 
   # ── Plan: resolve Sonar projects + Docker targets (single OR monorepo) ──────
   # Normalises the scalar inputs (single project / one Dockerfile) and the list
@@ -352,6 +384,9 @@ jobs:
   plan:
     name: Resolve CI plan
     runs-on: ${{ inputs.runner }}
+    # read-only: checks out the repo to auto-detect Dockerfiles
+    permissions:
+      contents: read
     outputs:
       sonar-projects: ${{ steps.resolve.outputs.sonar-projects }}
       sonar-count:    ${{ steps.resolve.outputs.sonar-count }}
@@ -360,6 +395,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Resolve plan
         id: resolve
@@ -522,6 +559,14 @@ jobs:
       fail-fast: false              # one image's findings must not cancel the others
       matrix:
         tgt: ${{ fromJSON(needs.plan.outputs.docker-targets) }}
+    # SARIF upload (security-events/actions); contents/id-token/attestations
+    # write only for attaching the container SBOM + attestation on release
+    permissions:
+      contents: write
+      security-events: write
+      actions: read
+      id-token: write
+      attestations: write
     uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
     with:
       dockerfile:             ${{ matrix.tgt.dockerfile }}
@@ -536,7 +581,8 @@ jobs:
       grype-enable:           ${{ inputs.docker-grype-enable }}
       sbom-attach-to-release: ${{ github.event_name == 'release' }}
       runner:                 ${{ inputs.runner }}
-    secrets: inherit
+    secrets:
+      AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PHASE 2 — Gated on Phase 1, push to main branch only
@@ -559,6 +605,10 @@ jobs:
       github.ref_name == inputs.main-branch &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
+    # write to open/update the Release PR, tag the release and attach SBOMs
+    permissions:
+      contents: write
+      pull-requests: write
     uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
       release-type:             ${{ inputs.release-type }}
@@ -566,7 +616,6 @@ jobs:
       target-branch:            ${{ inputs.main-branch }}
       generate-sbom-on-release: true
       runner:                   ${{ inputs.runner }}
-    secrets: inherit
 
   sbom:
     name: SBOM Generation
@@ -579,11 +628,15 @@ jobs:
       ) &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled')
+    # write only for attaching SBOMs + attestation to releases
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
     with:
       attach-to-release: ${{ github.event_name == 'release' }}
       runner:            ${{ inputs.runner }}
-    secrets: inherit
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FINAL — Detailed consolidated report (always runs, never fails itself)
@@ -594,6 +647,9 @@ jobs:
     needs: [plan, secret-scan, sonarcloud, license-check, release-please, sbom, docker-lint]
     if: always()
     runs-on: ${{ inputs.runner }}
+    # read-only: downloads this run's artifacts and writes the step summary
+    permissions:
+      contents: read
 
     steps:
       # ── Download artifacts from Phase 1 jobs ────────────────────────────

@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
 
+# Token permissions: the maximum the shared workflow requests. GitHub
+# validates these at start-up even for jobs that are skipped (Release Please is
+# currently disabled but still needs pull-requests: write declared), and each
+# shared job narrows them further.
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   release:
     name: Release Please
@@ -19,7 +27,6 @@ jobs:
       # changelog-path: "CHANGELOG.md"     # default
       # generate-sbom-on-release: true     # default in reusable wf — SBOM on release via post-release job
       #                                      (orchestrator also runs sbom on `release` events — see org README)
-    secrets: inherit
 
   # ── Example: use the release outputs in a downstream deploy job ──────────
   # deploy:

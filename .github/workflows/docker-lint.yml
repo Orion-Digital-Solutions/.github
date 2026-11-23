@@ -4,10 +4,17 @@ name: Docker Best Practices (Reusable)
 #
 # Caller usage:
 #   uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+#   permissions:               # union of what the jobs below request — a called
+#     contents: write          # workflow can never be granted more than its caller
+#     security-events: write
+#     actions: read
+#     id-token: write
+#     attestations: write
 #   with:
 #     dockerfile: "Dockerfile"
 #     image-name: "myapp:ci"
-#   secrets: inherit
+#   secrets:
+#     AZURE_NPM_TOKEN: ${{ secrets.AZURE_NPM_TOKEN }}   # optional; only if the build pulls private npm packages
 #
 # ── Pipeline stages ───────────────────────────────────────────────────────────
 #
@@ -214,12 +221,15 @@ on:
         type: string
         default: "ubuntu-latest"
 
+    secrets:
+      AZURE_NPM_TOKEN:
+        description: "Read-only npm registry token, mounted only as a BuildKit secret (never a build-arg)"
+        required: false
+
+# Least privilege: read-only by default; each job below requests only what it
+# needs. Write scopes live solely on the jobs that use them.
 permissions:
-  contents: write          # attach SBOMs to GitHub Release assets
-  security-events: write   # upload SARIF to GitHub Security tab
-  id-token: write          # Sigstore OIDC attestation (only used when sbom-attest: true)
-  attestations: write      # store signed attestation
-  actions: read            # code-scanning preflight API call
+  contents: read
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
@@ -228,10 +238,16 @@ jobs:
   lint:
     name: Static Analysis & Linting
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read           # checkout
+      security-events: write   # upload Hadolint/Checkov SARIF to the Security tab
+      actions: read            # SARIF upload reads workflow run metadata (private repos)
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       # ── Multi-stage build advisory ─────────────────────────────────────────
       # Advisory only: emits a warning when a single-stage Dockerfile is found.
@@ -376,10 +392,13 @@ jobs:
       - name: Fail if lint checks failed
         if: steps.hadolint.outcome == 'failure' || steps.checkov.outcome == 'failure'
         shell: bash
+        env:
+          HADOLINT_OUTCOME: ${{ steps.hadolint.outcome }}
+          CHECKOV_OUTCOME:  ${{ steps.checkov.outcome }}
         run: |
           FAILED_TOOLS=""
-          [ "${{ steps.hadolint.outcome }}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Hadolint"
-          [ "${{ steps.checkov.outcome }}"  = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Checkov"
+          [ "${HADOLINT_OUTCOME}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Hadolint"
+          [ "${CHECKOV_OUTCOME}"  = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Checkov"
           echo "::error::Dockerfile lint/security check(s) failed:${FAILED_TOOLS}. See the CI Report (or the GitHub Security tab) for the exact checks."
           exit 1
 
@@ -390,12 +409,17 @@ jobs:
     name: Build Docker Image
     if: inputs.build-image
     runs-on: ${{ inputs.runner }}
+    # Read-only: this job executes the (possibly PR-supplied) Dockerfile.
+    permissions:
+      contents: read           # checkout
     outputs:
       image-name: ${{ steps.meta.outputs.image-name }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -426,6 +450,7 @@ jobs:
           REF_NAME:   ${{ github.ref_name }}
           REPO_URL:   ${{ github.server_url }}/${{ github.repository }}
           NPM_TOKEN:  ${{ secrets.AZURE_NPM_TOKEN }}
+          DOCKERFILE_PATH: ${{ inputs.dockerfile }}
         run: |
           LABEL_FLAGS=(
             "--label" "org.opencontainers.image.source=${REPO_URL}"
@@ -443,7 +468,7 @@ jobs:
 
           docker build \
             --secret id=npm_token,env=NPM_TOKEN \
-            -f "${{ inputs.dockerfile }}" \
+            -f "${DOCKERFILE_PATH}" \
             -t "${IMAGE_NAME}" \
             "${LABEL_FLAGS[@]}" \
             "${BUILD_ARG_FLAGS[@]}" \
@@ -509,6 +534,10 @@ jobs:
     needs: [lint, build]
     if: inputs.build-image
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read           # baseline read access
+      security-events: write   # upload Trivy/Grype SARIF to the Security tab
+      actions: read            # SARIF upload reads workflow run metadata (private repos)
 
     steps:
       - name: Download image artifact
@@ -662,12 +691,16 @@ jobs:
       - name: Fail if vulnerabilities detected
         if: steps.trivy-table.outcome == 'failure' || (inputs.grype-enable && steps.grype.outcome == 'failure')
         shell: bash
+        env:
+          TRIVY_OUTCOME: ${{ steps.trivy-table.outcome }}
+          GRYPE_OUTCOME: ${{ steps.grype.outcome }}
+          SEVERITY:      ${{ inputs.trivy-severity }}
         run: |
           FAILED_TOOLS=""
-          [ "${{ steps.trivy-table.outcome }}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Trivy"
-          [ "${{ steps.grype.outcome }}"        = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Grype"
+          [ "${TRIVY_OUTCOME}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Trivy"
+          [ "${GRYPE_OUTCOME}" = "failure" ] && FAILED_TOOLS="${FAILED_TOOLS} Grype"
           COUNT=$(jq '.meta.vulnerability_count' docker-vuln-report.json 2>/dev/null || echo "unknown")
-          echo "::error::${COUNT} vulnerability/vulnerabilities at severity ${{ inputs.trivy-severity }} detected by:${FAILED_TOOLS}. Review the 'docker-vuln-report' artifact or GitHub Security tab."
+          echo "::error::${COUNT} vulnerability/vulnerabilities at severity ${SEVERITY} detected by:${FAILED_TOOLS}. Review the 'docker-vuln-report' artifact or GitHub Security tab."
           exit 1
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -678,6 +711,10 @@ jobs:
     needs: [lint, build]
     if: inputs.build-image && inputs.sbom-enable
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: write          # attach SBOMs to GitHub Release assets (release event only)
+      id-token: write          # Sigstore OIDC signing for the SBOM attestation (sbom-attest: true)
+      attestations: write      # store the signed attestation
 
     steps:
       - name: Download image artifact
@@ -745,6 +782,7 @@ jobs:
           IMAGE_NAME:    ${{ needs.build.outputs.image-name }}
           EVENT_NAME:    ${{ github.event_name }}
           ATTACH:        ${{ inputs.sbom-attach-to-release }}
+          REF_NAME:      ${{ github.ref_name }}
         run: |
           echo "### Container Image SBOM" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -756,7 +794,7 @@ jobs:
           echo "| CycloneDX JSON | \`${ARTIFACT_NAME}.cyclonedx.json\` |" >> "$GITHUB_STEP_SUMMARY"
           if [ "${ATTACH}" = "true" ] && [ "${EVENT_NAME}" = "release" ]; then
             echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "Both files attached to GitHub Release **${{ github.ref_name }}**." >> "$GITHUB_STEP_SUMMARY"
+            echo "Both files attached to GitHub Release **${REF_NAME}**." >> "$GITHUB_STEP_SUMMARY"
           fi
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -767,6 +805,8 @@ jobs:
     needs: [lint, build]
     if: inputs.build-image && inputs.dive-enable
     runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read           # baseline read access; Dive only inspects the local image
 
     steps:
       - name: Download image artifact
