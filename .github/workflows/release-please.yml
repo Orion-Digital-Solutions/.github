@@ -180,7 +180,7 @@ jobs:
       - name: Run Release Please (single package)
         id: rp
         if: ${{ !inputs.manifest-mode && inputs.release-type != '' }}
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           release-type:    ${{ inputs.release-type }}
           target-branch:   ${{ inputs.target-branch }}
@@ -194,7 +194,7 @@ jobs:
       - name: Run Release Please (manifest / monorepo)
         id: rpm
         if: ${{ inputs.manifest-mode }}
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           config-file:   ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
@@ -211,7 +211,7 @@ jobs:
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           ref: ${{ needs.release-please.outputs.tag-name }}

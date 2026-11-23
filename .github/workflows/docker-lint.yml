@@ -245,7 +245,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -301,7 +301,7 @@ jobs:
       - name: Hadolint — Dockerfile lint
         id: hadolint
         continue-on-error: true
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile:  ${{ inputs.dockerfile }}
           ignore:      ${{ inputs.hadolint-ignore }}
@@ -417,12 +417,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Resolve final image name and expose as a job output so downstream
       # jobs can reference the exact same tag without duplicating logic.
@@ -541,7 +541,7 @@ jobs:
 
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: docker-image-${{ github.sha }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
@@ -579,7 +579,7 @@ jobs:
       - name: Trivy — vulnerability scan (table)
         id: trivy-table
         continue-on-error: true
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref:       ${{ needs.build.outputs.image-name }}
           scan-type:       image
@@ -592,7 +592,7 @@ jobs:
       # ── Trivy — JSON output (report artifact) ─────────────────────────────
       - name: Trivy — vulnerability scan (JSON report)
         if: always()
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref:       ${{ needs.build.outputs.image-name }}
           scan-type:       image
@@ -606,7 +606,7 @@ jobs:
       # ── Trivy — SARIF output (GitHub Security tab) ────────────────────────
       - name: Trivy — vulnerability scan (SARIF)
         if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
-        uses: aquasecurity/trivy-action@v0.35.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref:       ${{ needs.build.outputs.image-name }}
           scan-type:       image
@@ -633,7 +633,7 @@ jobs:
         id: grype
         if: inputs.grype-enable
         continue-on-error: true
-        uses: anchore/scan-action@v3
+        uses: anchore/scan-action@v7
         with:
           image:           ${{ needs.build.outputs.image-name }}
           fail-build:      true
@@ -718,7 +718,7 @@ jobs:
 
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: docker-image-${{ github.sha }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 
@@ -768,7 +768,7 @@ jobs:
 
       - name: Attest container SBOM (SPDX)
         if: inputs.sbom-attest
-        uses: actions/attest-sbom@v3
+        uses: actions/attest-sbom@v4
         with:
           subject-name:   ${{ needs.build.outputs.image-name }}
           subject-digest: ${{ steps.image-digest.outputs.digest }}
@@ -810,7 +810,7 @@ jobs:
 
     steps:
       - name: Download image artifact
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: docker-image-${{ github.sha }}${{ inputs.target-id != '' && format('-{0}', inputs.target-id) || '' }}
 

@@ -394,7 +394,7 @@ jobs:
       docker-count:   ${{ steps.resolve.outputs.docker-count }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -654,14 +654,14 @@ jobs:
     steps:
       # ── Download artifacts from Phase 1 jobs ────────────────────────────
       - name: Download Gitleaks report
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: gitleaks-report
           path: ./reports/gitleaks
         continue-on-error: true   # artifact may not exist if job was skipped
 
       - name: Download license report
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: license-report
           path: ./reports/license
@@ -671,7 +671,7 @@ jobs:
       # own ./reports/docker/<artifact-name>/docker-vuln-report.json subdirectory.
       # Only exist when docker-lint built + scanned an image (docker-build-image).
       - name: Download Docker vulnerability reports
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: docker-vuln-report*
           path: ./reports/docker
@@ -681,7 +681,7 @@ jobs:
       # report can show EXACTLY which checks failed (always produced when docker
       # ran, in both lint-only and build modes).
       - name: Download Docker lint findings
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: docker-lint-result*
           path: ./reports/docker-lint
