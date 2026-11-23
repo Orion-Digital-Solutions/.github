@@ -60,6 +60,7 @@ jobs:
   sync:
     name: Sync Labels
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
     # contents: read for the labels.yml checkout; issues: write to manage labels.
     permissions:
       contents: read

@@ -1,0 +1,144 @@
+name: Lint workflows
+
+# Pull-request check for THIS repository (ROADMAP 4.1). Not a reusable
+# workflow: it lints the shared workflows and the starter templates.
+#
+#   actionlint     - syntax, expressions, runner labels, shellcheck (warning+)
+#                    on run: scripts
+#   zizmor         - security audit (template injection, pinning, permissions);
+#                    fails on medium or higher. Policy: .github/zizmor.yml
+#   pinned-inputs  - `with:` keys of SHA-pinned step actions checked against
+#                    their action.yml (actionlint skips SHA-pinned actions)
+#
+# Tool versions and hashes are pinned here; bump them by hand, respecting the
+# 7-day cool-down (see CONTRIBUTING.md, "Releasing the shared workflows").
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "workflow-templates/**"
+      - ".github/scripts/**"
+      - ".github/zizmor.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "workflow-templates/**"
+      - ".github/scripts/**"
+      - ".github/zizmor.yml"
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      ACTIONLINT_VERSION: "1.7.12"
+      # From actionlint_1.7.12_checksums.txt on the v1.7.12 release.
+      ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/actionlint"
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}/actionlint" actionlint
+          echo "${RUNNER_TEMP}/actionlint" >> "${GITHUB_PATH}"
+
+      # shellcheck is preinstalled on ubuntu-latest, so run: scripts are
+      # checked too. Only warnings and errors fail the job; style and info
+      # notes (SC2129, SC2005, ...) are left to review.
+      - name: Run actionlint
+        env:
+          SHELLCHECK_OPTS: --severity=warning
+        run: actionlint -color .github/workflows/*.yml workflow-templates/*.yml
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # Hash from PyPI: zizmor-1.32.0-py3-none-manylinux_2_28_x86_64.whl (published 2026-11-02; 7-day cool-down).
+      # zizmor has no runtime dependencies.
+      - name: Install zizmor
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'zizmor==1.32.0 --hash=sha256:84a6acb975accc13408786a2bd274b572537ca19c933ebbc13e78f3988562071' \
+            > "${RUNNER_TEMP}/zizmor-requirements.txt"
+          python -m pip install --disable-pip-version-check --no-deps \
+            --only-binary=:all: --require-hashes \
+            -r "${RUNNER_TEMP}/zizmor-requirements.txt"
+
+      # Files are passed explicitly: given the workflow-templates/ directory,
+      # zizmor collects nothing from it.
+      - name: Run zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          zizmor --config .github/zizmor.yml --min-severity medium
+          --format plain --color always
+          .github/workflows/*.yml workflow-templates/*.yml
+
+  pinned-inputs:
+    name: pinned-inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # Hash from PyPI: PyYAML-6.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.
+      - name: Install PyYAML
+        run: |
+          set -euo pipefail
+          printf '%s\n' \
+            'pyyaml==6.0.2 --hash=sha256:80bab7bfc629882493af4aa31a4cfa43a4c57c83813253626916b8c7ada83476' \
+            > "${RUNNER_TEMP}/pinned-inputs-requirements.txt"
+          python -m pip install --disable-pip-version-check --no-deps \
+            --only-binary=:all: --require-hashes \
+            -r "${RUNNER_TEMP}/pinned-inputs-requirements.txt"
+
+      # gh (preinstalled on the runner) reads action.yml at each pinned SHA.
+      - name: Check inputs of pinned actions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/check_pinned_inputs.py .github/workflows/*.yml workflow-templates/*.yml

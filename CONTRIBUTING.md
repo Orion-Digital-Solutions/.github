@@ -13,6 +13,7 @@ Thank you for your interest in contributing to our projects. We welcome contribu
 - [Pull Request Process](#pull-request-process)
 - [CI Pipeline](#ci-pipeline)
 - [Development Standards](#development-standards)
+- [Releasing the shared workflows](#releasing-the-shared-workflows)
 
 ---
 
@@ -179,6 +180,85 @@ GitHub Actions does **not** skip workflows based on `[skip ci]` unless each work
 - Write unit tests for all new business logic.
 - Maintain test coverage at or above the project's established threshold.
 - Follow API versioning conventions for any public-facing endpoints.
+
+---
+
+## Releasing the shared workflows
+
+This section applies to this repository (`Orion-Digital-Solutions/.github`) only. Its reusable workflows run in every caller repository, so a bad change breaks CI org-wide on the callers' next run.
+
+### 1. Pull request and review
+
+- Every change goes through a pull request. Nobody pushes to `main` directly.
+- A code owner must approve (see [`CODEOWNERS`](CODEOWNERS): DevOps and engineering leads for `.github/workflows/` and `workflow-templates/`).
+- The **Lint workflows** check (actionlint, zizmor, pinned-inputs) must be green. Run the same tools locally before pushing if you can.
+- If a PR is stacked on another PR's branch, do **not** delete that base branch until the dependent PR has been retargeted to `main` (**Edit** next to the PR title). Deleting a PR's base branch can make GitHub close the dependent PR.
+
+### 2. Test in the sandbox
+
+The private repository [`Orion-Digital-Solutions/ci-sandbox`](https://github.com/Orion-Digital-Solutions/ci-sandbox) is a test caller with a Node app, a Python app and two Dockerfiles.
+
+1. On a branch in the sandbox, change the `@<ref>` of **every** `uses:` line in both workflows to your PR branch (or its head SHA):
+   - `orchestrator.yml` calls `ci.yml@<ref>`.
+   - `direct.yml` calls each child workflow (`secret-scanning`, `license-compliance`, `docker-lint`, `sbom`, `label-sync`) at `@<ref>`. The orchestrator calls its children by relative path, so `orchestrator.yml` also exercises the children from the same commit; `direct.yml` additionally tests options the orchestrator doesn't pass (e.g. `grype-enable`).
+2. Push and let both workflows run (or start them with **Run workflow**).
+3. Required result: both runs green, and every job your change touches actually ran (not skipped). Read the run summary, not just the status.
+4. SonarCloud cannot be exercised in the sandbox (no SonarCloud project is bound to it). Test Sonar changes in a real caller on a branch that points at your PR branch, and say so in the PR.
+
+Put links to the sandbox runs in the PR description.
+
+### 3. Merge
+
+Squash-merge with a Conventional Commit title. Callers on `@main` pick the change up immediately, so merge only after the sandbox is green.
+
+### 4. Tag
+
+Releases use two kinds of tag:
+
+| Tag | Example | Rule |
+|---|---|---|
+| Immutable release tag | `v1.4.2` | Created once on the release commit. Never moved or deleted. |
+| Moving major tag | `v1` | Points at the latest `v1.x.y`. Moved only after the sandbox run on the release commit is green. |
+
+```bash
+git switch main && git pull
+SHA=$(git rev-parse HEAD)
+# Point both sandbox workflows at $SHA and wait for green runs. Then:
+git tag -a v1.4.2 -m "v1.4.2" "$SHA"
+git push origin v1.4.2
+git tag -f v1 "$SHA"
+git push -f origin v1
+```
+
+Publish a GitHub release for `vX.Y.Z` with short notes (what changed, anything callers must do). To roll back, move `v1` back to the previous release commit the same way; never rewrite a `vX.Y.Z` tag.
+
+### Semantic versioning for these workflows
+
+The public interface is each workflow's inputs, outputs, secrets, job names (callers' required checks match on them) and the permissions it needs.
+
+| Bump | When | Examples |
+|---|---|---|
+| Patch | Bug fix, no interface or behaviour change for a passing caller | Fix a script error; bump an action pin |
+| Minor | New optional input or behaviour, off or unchanged by default | New input with a default that keeps today's behaviour |
+| Major | Anything that can break a caller | Remove or rename an input, output, secret or job name; require a new permission; add a rule that can newly fail a caller (for example the held Hadolint 2.15 upgrade, ROADMAP 3.6) |
+
+A major change gets a new major tag (`v2`) and a migration note. `v1` does not move to it.
+
+### How callers pin
+
+| Pin | Use when |
+|---|---|
+| `@v1` (recommended) | Normal callers. Receives fixes and compatible features. |
+| `@v1.4.2` | You want to choose when to upgrade. |
+| `@<full commit SHA>` | Strictest: immune to tag moves. Update by hand. |
+
+Move off `@main` once `v1` exists: it changes on every merge, before the tag procedure above has run.
+
+### Keeping action pins current
+
+- Third-party actions are pinned to a full commit SHA with a `# vX.Y.Z` comment. Dependabot updates them in `.github/workflows/`.
+- Dependabot does **not** scan `workflow-templates/`. When a pin changes in the workflows, update the same action in the templates by hand in the same PR, and update their `@v1` references when a new major is released.
+- Cool-down: adopt a new action or tool version only once it has been published for at least 7 days (Dependabot is configured the same way). This gives a hijacked or broken release time to be caught. The same applies to tool versions and hashes pinned in `run:` steps (Gitleaks, actionlint, zizmor).
 
 ---
 

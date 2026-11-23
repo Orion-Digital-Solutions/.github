@@ -92,6 +92,7 @@ jobs:
   stale:
     name: Mark and Close Stale Items
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     # Label, comment on and close inactive issues and PRs.
     permissions:
       issues: write
