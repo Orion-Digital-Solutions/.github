@@ -82,6 +82,8 @@ jobs:
         uses: EndBug/label-sync@v2
         with:
           # A local path; `source` is not an input of this action and was ignored.
-          config-file: labels.yml
+          # The leading ./ matters: the action's isURL() regex treats a bare
+          # "labels.yml" as a domain name and tries to download it over HTTP.
+          config-file: ./labels.yml
           delete-other-labels: ${{ inputs.delete-other-labels }}
           request-token: ${{ secrets.GITHUB_TOKEN }}
