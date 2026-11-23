@@ -3,13 +3,39 @@ name: Release Please (Reusable)
 # Reusable workflow — automated versioning, changelogs, and GitHub Releases
 # using Release Please (Google).
 #
-# Caller usage (no secrets needed; the calling job must grant at least these):
+# Caller usage (the calling job must grant at least these permissions):
 #   permissions:
 #     contents: write
 #     pull-requests: write
 #   uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
 #   with:
 #     release-type: python
+#     # Optional — act as a GitHub App so Release PRs / releases trigger CI:
+#     app-id: ${{ vars.RELEASE_APP_ID }}
+#   secrets:
+#     RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}  # optional
+#
+# ── Token: GitHub App vs GITHUB_TOKEN ────────────────────────────────────────
+# By default Release Please uses the job's GITHUB_TOKEN. Anything created with
+# GITHUB_TOKEN (the Release PR, its commits, the tag and the GitHub Release)
+# does NOT start other workflows: no CI on the Release PR and no
+# `on: release` / tag-push workflows. To avoid that, set BOTH:
+#   • input  app-id                  — the GitHub App's Client ID (or numeric
+#                                      App ID; both are accepted)
+#   • secret RELEASE_APP_PRIVATE_KEY — the App's private key (PEM)
+# The workflow then mints a short-lived installation token (scoped to the
+# calling repository only, revoked at job end) and Release Please acts as the
+# App. If either is missing it falls back to GITHUB_TOKEN with a notice.
+#
+# GitHub App repository permissions required (install it only on the repos
+# that release):
+#   • Contents:      Read and write  (release commits, tags, GitHub Releases)
+#   • Pull requests: Read and write  (open / update the Release PR)
+#   • Issues:        Read and write  (the "autorelease: pending/tagged" labels;
+#                                     release-please docs list issues: write)
+#   • Metadata:      Read-only       (mandatory for every App)
+# The caller's `permissions:` above are still needed: GITHUB_TOKEN is used for
+# the fallback and for attaching SBOMs to the release.
 #
 # ── How it works ─────────────────────────────────────────────────────────────
 # Every push to the target branch (default: main) that contains Conventional
@@ -23,7 +49,8 @@ name: Release Please (Reusable)
 # Merging the Release PR:
 #   • Creates a Git tag (e.g. v1.4.0)
 #   • Creates a GitHub Release with the changelog as release notes
-#   • Triggers the post-release steps below (SBOM, deployment hooks, etc.)
+#   • Triggers the post-release steps below (SBOMs attached to every release
+#     created in this run with `gh release upload`)
 #
 # ── Conventional Commit → version bump mapping ───────────────────────────────
 #   feat:          minor bump  (1.0.0 → 1.1.0)
@@ -39,9 +66,16 @@ name: Release Please (Reusable)
 # Set manifest-mode: true and commit a release-please-config.json +
 # .release-please-manifest.json at the repo root. Each package's release-type,
 # version, and changelog sections are configured there (independent SemVer per
-# package). In manifest mode the release-type / changelog-types inputs are
-# ignored — all configuration lives in the config file.
+# package). In manifest mode the release-type input is ignored — all
+# configuration lives in the config file.
 # See: https://github.com/googleapis/release-please/blob/main/docs/manifest-releaser.md
+#
+# ── Deprecated inputs ────────────────────────────────────────────────────────
+# version-file, changelog-path and changelog-types are still accepted (so
+# existing callers keep working) but are ignored: release-please-action v4
+# removed them. Configure changelog-path / changelog-sections / extra-files in
+# release-please-config.json (manifest-mode: true; a single package is just
+# the "." entry). A warning is emitted when a caller sets any of them.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -87,25 +121,41 @@ on:
         type: string
         default: "main"
 
-      # ── Optional — Versioning ────────────────────────────────────────────────
-      # Override the version file path if Release Please can't detect it.
-      version-file:
-        description: "Path to the version file (e.g. pyproject.toml, package.json)"
+      # ── Optional — GitHub App token ──────────────────────────────────────────
+      # See "Token: GitHub App vs GITHUB_TOKEN" in the header.
+      app-id:
+        description: >
+          GitHub App Client ID (or numeric App ID) used to create the Release PR
+          and releases so they trigger other workflows. Requires the
+          RELEASE_APP_PRIVATE_KEY secret. Leave blank to use GITHUB_TOKEN.
         required: false
         type: string
         default: ""
 
-      # ── Optional — Changelog ────────────────────────────────────────────────
+      # ── Deprecated — ignored (kept so existing callers do not break) ─────────
+      version-file:
+        description: >
+          DEPRECATED — ignored by release-please-action v4+; configure this in
+          release-please-config.json. (Was: path to the version file.)
+        required: false
+        type: string
+        default: ""
+
       changelog-path:
-        description: "Path to the changelog file"
+        description: >
+          DEPRECATED — ignored by release-please-action v4+; configure this in
+          release-please-config.json. (Was: path to the changelog file.)
         required: false
         type: string
         default: "CHANGELOG.md"
 
-      # Changelog types to include. Omitting feat/fix from this list only hides
-      # them from the changelog — they still trigger version bumps.
+      # Keep this default in sync with DEFAULT_TYPES in the "Warn about
+      # deprecated inputs" step.
       changelog-types:
-        description: "JSON array of Conventional Commit types to include in CHANGELOG"
+        description: >
+          DEPRECATED — ignored by release-please-action v4+; configure this in
+          release-please-config.json (changelog-sections). (Was: JSON array of
+          Conventional Commit types to include in CHANGELOG.)
         required: false
         type: string
         default: >-
@@ -120,9 +170,9 @@ on:
           ]
 
       # ── Optional — Post-release ──────────────────────────────────────────────
-      # Trigger SBOM generation and attachment to the release automatically.
+      # Generate SBOMs and attach them to the release(s) automatically.
       generate-sbom-on-release:
-        description: "Run the SBOM workflow when a release is created"
+        description: "Generate SBOMs (SPDX + CycloneDX) and attach them to the release(s) when a release is created"
         required: false
         type: boolean
         default: true
@@ -132,6 +182,14 @@ on:
         required: false
         type: string
         default: "ubuntu-latest"
+
+    secrets:
+      RELEASE_APP_PRIVATE_KEY:
+        description: >
+          Private key (PEM) of the GitHub App named by app-id. Optional; when it
+          and app-id are both set, Release Please runs as the App instead of
+          GITHUB_TOKEN.
+        required: false
 
     outputs:
       # Pass these outputs to downstream jobs in the calling workflow.
@@ -161,8 +219,8 @@ jobs:
     name: Release Please
     runs-on: ${{ inputs.runner }}
     permissions:
-      contents: write       # create tags and GitHub Releases
-      pull-requests: write  # open and update Release PRs
+      contents: write       # create tags and GitHub Releases (GITHUB_TOKEN fallback)
+      pull-requests: write  # open and update Release PRs (GITHUB_TOKEN fallback)
 
     outputs:
       # Single-package (release-type) and manifest modes expose different outputs;
@@ -174,18 +232,79 @@ jobs:
       version:         ${{ steps.rp.outputs.version }}
       upload-url:      ${{ steps.rp.outputs.upload_url }}
       paths-released:  ${{ steps.rpm.outputs.paths_released }}
+      # Internal (not a workflow output): every manifest-mode output, including
+      # the per-package "<path>--tag_name" keys, for post-release to read.
+      rpm-outputs:     ${{ toJSON(steps.rpm.outputs) }}
 
     steps:
+      # Names only, never values, are echoed (no workflow-command injection).
+      - name: Warn about deprecated inputs
+        shell: bash
+        env:
+          VERSION_FILE:    ${{ inputs.version-file }}
+          CHANGELOG_PATH:  ${{ inputs.changelog-path }}
+          CHANGELOG_TYPES: ${{ inputs.changelog-types }}
+        run: |
+          # Must match the changelog-types input default (whitespace ignored).
+          DEFAULT_TYPES='[{"type":"feat","section":"Features"},{"type":"fix","section":"Bug Fixes"},{"type":"perf","section":"Performance"},{"type":"refactor","section":"Refactoring"},{"type":"docs","section":"Documentation"},{"type":"chore","section":"Chores","hidden":true},{"type":"ci","section":"CI/CD","hidden":true}]'
+          norm() { printf '%s' "$1" | tr -d '[:space:]'; }
+
+          deprecated=()
+          [ -z "${VERSION_FILE}" ]                                      || deprecated+=("version-file")
+          [ "${CHANGELOG_PATH}" = "CHANGELOG.md" ]                      || deprecated+=("changelog-path")
+          [ "$(norm "${CHANGELOG_TYPES}")" = "$(norm "${DEFAULT_TYPES}")" ] || deprecated+=("changelog-types")
+
+          for name in "${deprecated[@]}"; do
+            echo "::warning title=Deprecated input ${name}::'${name}' is ignored by release-please-action v4+. Configure it in release-please-config.json (manifest-mode: true) and stop passing it."
+          done
+
+      - name: Resolve release token
+        id: token-mode
+        shell: bash
+        env:
+          APP_ID:      ${{ inputs.app-id }}
+          HAS_APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ -n "${APP_ID}" ] && [ "${HAS_APP_KEY}" = "true" ]; then
+            echo "use-app=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "use-app=false" >> "$GITHUB_OUTPUT"
+          if [ -n "${APP_ID}" ] || [ "${HAS_APP_KEY}" = "true" ]; then
+            echo "::warning title=Incomplete GitHub App configuration::Set BOTH the app-id input and the RELEASE_APP_PRIVATE_KEY secret to run Release Please as a GitHub App. Falling back to GITHUB_TOKEN."
+          fi
+          echo "::notice title=Release Please uses GITHUB_TOKEN::Release PRs and releases created by GITHUB_TOKEN will not trigger CI or 'release' workflows. Set the app-id input and RELEASE_APP_PRIVATE_KEY secret to use a GitHub App token instead."
+
+      # Installation token for the calling repository only (owner/repositories
+      # unset), revoked automatically at the end of the job, narrowed to the
+      # three permissions below. The App installation must grant all three
+      # (see the header) or token creation fails.
+      # `app-id` is deprecated in v3 in favour of `client-id` (both are read
+      # into the same value and accept a Client ID or an App ID), but
+      # actionlint's bundled metadata does not know `client-id` yet; switch
+      # when it does.
+      - name: Create GitHub App token
+        id: app-token
+        if: steps.token-mode.outputs.use-app == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id:                   ${{ inputs.app-id }}
+          private-key:              ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents:      write
+          permission-pull-requests: write
+          permission-issues:        write
+
       # Single-package mode — driven by release-type.
+      # changelog-path / changelog-types are intentionally NOT passed:
+      # release-please-action v4 no longer has those inputs.
       - name: Run Release Please (single package)
         id: rp
         if: ${{ !inputs.manifest-mode && inputs.release-type != '' }}
         uses: googleapis/release-please-action@v4
         with:
+          token:           ${{ steps.app-token.outputs.token || github.token }}
           release-type:    ${{ inputs.release-type }}
           target-branch:   ${{ inputs.target-branch }}
-          changelog-path:  ${{ inputs.changelog-path }}
-          changelog-types: ${{ inputs.changelog-types }}
 
       # Manifest mode — monorepo with independently versioned packages.
       # All per-package release-type, changelog sections, version bumps, pre-1.0
@@ -196,6 +315,7 @@ jobs:
         if: ${{ inputs.manifest-mode }}
         uses: googleapis/release-please-action@v4
         with:
+          token:         ${{ steps.app-token.outputs.token || github.token }}
           config-file:   ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
           target-branch: ${{ inputs.target-branch }}
@@ -217,7 +337,10 @@ jobs:
           ref: ${{ needs.release-please.outputs.tag-name }}
           fetch-depth: 0
 
-      # ── Generate and attach SBOM to the release ────────────────────────
+      # ── Generate SBOMs ─────────────────────────────────────────────────
+      # upload-release-assets is off: sbom-action only attaches on a `release`
+      # event or a tag-push ref, and this job runs on a branch push. The SBOMs
+      # are attached explicitly in the next step instead.
       - name: Generate SBOM — SPDX JSON
         if: inputs.generate-sbom-on-release
         uses: anchore/sbom-action@v0
@@ -227,7 +350,7 @@ jobs:
           output-file:           sbom.spdx.json
           upload-artifact:       true
           artifact-name:         sbom-spdx-${{ needs.release-please.outputs.tag-name || github.ref_name }}.json
-          upload-release-assets: true
+          upload-release-assets: false
 
       - name: Generate SBOM — CycloneDX JSON
         if: inputs.generate-sbom-on-release
@@ -238,16 +361,65 @@ jobs:
           output-file:           sbom.cyclonedx.json
           upload-artifact:       true
           artifact-name:         sbom-cyclonedx-${{ needs.release-please.outputs.tag-name || github.ref_name }}.json
-          upload-release-assets: true
+          upload-release-assets: false
+
+      # ── Attach SBOMs to every release created in this run ──────────────
+      # Single-package mode: the one tag in tag-name.
+      # Manifest mode: tag-name is empty; each released package has its own tag
+      # in the release-please outputs ("tag_name" for the root package ".",
+      # "<path>--tag_name" for the others). Limitation: the SBOM is generated
+      # for the whole repository ("."), so every package release in a manifest
+      # run receives the same repository-wide SBOM, not a per-package one.
+      - name: Attach SBOMs to release(s)
+        id: attach
+        if: inputs.generate-sbom-on-release
+        shell: bash
+        env:
+          GH_TOKEN:    ${{ github.token }}
+          TAG:         ${{ needs.release-please.outputs.tag-name }}
+          RPM_OUTPUTS: ${{ needs.release-please.outputs.rpm-outputs }}
+        run: |
+          if [ -n "${TAG}" ]; then
+            tags="${TAG}"
+          else
+            rpm_json="${RPM_OUTPUTS}"
+            [ -n "${rpm_json}" ] || rpm_json='{}'
+            tags=$(printf '%s' "${rpm_json}" | jq -r '
+              to_entries[]
+              | select(.key | test("(^|--)tag_name$"))
+              | .value | select(. != null and . != "")')
+          fi
+
+          attached=()
+          failed=0
+          while IFS= read -r t; do
+            [ -n "${t}" ] || continue
+            if gh release upload "${t}" sbom.spdx.json sbom.cyclonedx.json \
+                 --clobber --repo "${GITHUB_REPOSITORY}"; then
+              attached+=("${t}")
+            else
+              echo "::error title=SBOM upload failed::Could not attach SBOMs to release ${t}"
+              failed=1
+            fi
+          done <<< "${tags}"
+
+          echo "tags=${attached[*]}" >> "$GITHUB_OUTPUT"
+          if [ "${#attached[@]}" -eq 0 ] && [ "${failed}" -eq 0 ]; then
+            echo "::warning title=SBOMs not attached::No release tag found in the release-please outputs; SBOMs were generated (see artifacts) but not attached."
+          fi
+          exit "${failed}"
 
       # ── Release summary ─────────────────────────────────────────────────
+      # Runs even if the attach step failed, so the summary states the outcome.
       - name: Release summary
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           TAG:      ${{ needs.release-please.outputs.tag-name }}
           VERSION:  ${{ needs.release-please.outputs.version }}
           PATHS:    ${{ needs.release-please.outputs.paths-released }}
           GEN_SBOM: ${{ inputs.generate-sbom-on-release }}
+          ATTACHED: ${{ steps.attach.outputs.tags }}
         run: |
           {
             if [ -n "${TAG}" ]; then
@@ -270,6 +442,10 @@ jobs:
             fi
             if [ "${GEN_SBOM}" = "true" ]; then
               echo ""
-              echo "SBOM (SPDX + CycloneDX) generated and attached to release assets."
+              if [ -n "${ATTACHED}" ]; then
+                echo "SBOM (SPDX + CycloneDX) attached to release(s): \`${ATTACHED}\`"
+              else
+                echo "SBOM generation was requested but the SBOMs were **not** attached to any release (see the job log; they may still be in the workflow artifacts)."
+              fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"

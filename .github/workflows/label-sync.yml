@@ -73,6 +73,7 @@ jobs:
         with:
           persist-credentials: false
           repository: orion-digital-solutions/.github
+          # Moves to the release tag (v1) in Phase 5.
           ref: main
           sparse-checkout: labels.yml
           sparse-checkout-cone-mode: false
@@ -80,6 +81,9 @@ jobs:
       - name: Sync labels to ${{ github.repository }}
         uses: EndBug/label-sync@v2
         with:
-          source: labels.yml
+          # A local path; `source` is not an input of this action and was ignored.
+          # The leading ./ matters: the action's isURL() regex treats a bare
+          # "labels.yml" as a domain name and tries to download it over HTTP.
+          config-file: ./labels.yml
           delete-other-labels: ${{ inputs.delete-other-labels }}
           request-token: ${{ secrets.GITHUB_TOKEN }}

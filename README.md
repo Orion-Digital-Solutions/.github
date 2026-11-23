@@ -150,7 +150,13 @@ See [SonarCloud Setup](#sonarcloud-setup-per-repository) below.
 
 Commit and push the workflow file. The pipeline will run on the next push or PR. Check the **Actions** tab → select the run → **Summary** tab at the top of the run for the consolidated CI report.
 
-The [starter template](workflow-templates/ci.yml) includes `concurrency` so a new push to the same branch cancels any in-progress run of that workflow (saves Actions minutes and avoids redundant scans).
+The [starter template](workflow-templates/ci.yml) does **not** set `concurrency`, so a new push to the same branch does not cancel a run already in progress. To get that behaviour (saves Actions minutes and avoids redundant scans), add a workflow-level block to your caller file, for example:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+```
 
 ---
 
@@ -168,7 +174,7 @@ Orion’s pipelines use **two different SonarCloud tokens** on purpose: one driv
 
 | Secret | Used by | Required | Description |
 |--------|---------|----------|-------------|
-| `SONAR_TOKEN` | **SonarCloud scan** job (`sonarcloud.yml`) | Yes (if SonarCloud is enabled) | Token for **running the analysis** and Quality Gate (SonarScanner / `sonarcloud-github-action`). Create at [sonarcloud.io](https://sonarcloud.io) → **My Account** → **Security** → **Generate Token** (type suitable for **analysis** on your projects). |
+| `SONAR_TOKEN` | **SonarCloud scan** job (`sonarcloud.yml`) | Yes (if SonarCloud is enabled) | Token for **running the analysis** and Quality Gate (SonarScanner / `SonarSource/sonarqube-scan-action`). Create at [sonarcloud.io](https://sonarcloud.io) → **My Account** → **Security** → **Generate Token** (type suitable for **analysis** on your projects). |
 | `SONAR_ISSUE_RETRIEVAL` | **CI Report** job (orchestrator `ci.yml` only) | Strongly recommended | Token for **read-only Web API** calls that build the Actions **Summary** (Quality Gate status, measures, top issues, hotspots). Must be able to **browse** project analysis data; it is never used to push a scan. If missing, the scan can still pass but the Summary’s detailed Sonar blocks will be degraded or empty. |
 
 You may use two physically different tokens in SonarCloud (best for least privilege), or the same token value in both secrets **only if** that single token has both analysis and API read permissions—your org policy should prefer two tokens when possible.
@@ -179,6 +185,7 @@ You may use two physically different tokens in SonarCloud (best for least privil
 |--------|----------|-------------|
 | `GITLEAKS_LICENSE` | No | Gitleaks Pro license key. Unlocks additional secret detection rules. Leave unset to use the free ruleset. |
 | `AZURE_NPM_TOKEN` | No | Read-only token for the private Azure Artifacts npm feed. Passed to the Docker image build as a BuildKit secret, only when the build pulls private npm packages. |
+| `RELEASE_APP_PRIVATE_KEY` | No | Private key (PEM) of a GitHub App used to mint the Release Please token, together with the `release-app-id` input (`app-id` when calling `release-please.yml` directly). Release PRs and releases created with the default `GITHUB_TOKEN` do not trigger other workflows; with the App they do. If either the key or the App ID is missing, Release Please falls back to `GITHUB_TOKEN`. The App needs Contents, Pull requests and Issues set to Read and write. |
 
 ### Workflow permissions
 
@@ -200,7 +207,7 @@ Do **not** grant "Read and write" org-wide. Instead, every workflow declares the
 
 ### The Orchestrator — `ci.yml` (recommended)
 
-The orchestrator is the **recommended way** to adopt CI. One file in your repo calls all pipelines. Updates made to the orchestrator in this `.github` repo automatically apply to every project repo on their next run — no changes needed in individual repos.
+The orchestrator is the **recommended way** to adopt CI. One file in your repo calls all pipelines. Updates made to the orchestrator in this `.github` repo automatically apply to every project repo on their next run — no changes needed in individual repos. The orchestrator calls its child workflows by **relative path** (`./.github/workflows/<file>.yml`), so they always come from the same commit as the `ci.yml` your repo references.
 
 #### Execution model
 
@@ -217,9 +224,14 @@ Phase 1 (parallel — sonar/docker skip if nothing resolved; license skips on re
                   Hadolint, Checkov, then Trivy/Grype/Syft/Dive when docker-build-image: true)
 
 Phase 2 — push to main (or release for SBOM attach):
-  ├─ release-please   (needs secret-scan, sonarcloud, license-check, docker-lint — all must
-  │                    pass or be skipped; skipped jobs do not block)
-  └─ sbom             (needs secret-scan + license-check only; not gated on SonarCloud)
+  ├─ release-please   (needs plan, secret-scan, sonarcloud, license-check, docker-lint — all
+  │                    must pass or be skipped; skipped jobs do not block)
+  │                    *** currently disabled org-wide in the orchestrator ***
+  └─ sbom             (same needs and rule as release-please; a skipped SonarCloud or
+                       Docker job does not block it, a failed one does)
+
+  A failed plan (malformed caller inputs) fails the run: the matrix jobs, release-please
+  and sbom are skipped, and the report banner turns red.
 
 Release follow-up:
   └─ When a GitHub Release is created, SBOM can attach to release assets (orchestrator `release`
@@ -229,7 +241,7 @@ Always (regardless of outcome):
   └─ report           (Actions Summary — Sonar APIs, Gitleaks + license + docker-vuln artifacts)
 ```
 
-Phase 1 wall-clock time is driven by the slowest of the scans plus Docker (when enabled). **SBOM** does not wait on SonarCloud or Docker: it is gated on secret scanning and license compliance only, so it can still run if SonarCloud is skipped (for example when `sonar-project-key` is empty) after those two succeed.
+Phase 1 wall-clock time is driven by the slowest of the scans plus Docker (when enabled). **SBOM** waits for all Phase 1 jobs, but only a **failed** (or cancelled) job blocks it: it still runs when SonarCloud or Docker is skipped (for example when `sonar-project-key` is empty or no Dockerfile is found).
 
 ---
 
@@ -276,6 +288,11 @@ with:
                                      # python | node | java | maven | gradle | dotnet | go | simple
                                      # See Release Please docs for the full list.
                                      # Leave blank to disable automated releases.
+                                     # Note: the release-please job is currently
+                                     # disabled org-wide in the orchestrator.
+  release-app-id: ""                 # GitHub App ID for the Release Please token, so its
+                                     # PRs and releases trigger other workflows. Also pass
+                                     # secret RELEASE_APP_PRIVATE_KEY. Blank = GITHUB_TOKEN.
 
   # ── Branch configuration ───────────────────────────────────────────────
   main-branch: "main"                # Default branch name. Phase 2 only runs on this branch.
@@ -284,6 +301,11 @@ with:
   forbidden-licenses: ""             # Override the org-default forbidden license list.
                                      # Format: "GPL-2.0,GPL-3.0,AGPL-3.0"
                                      # Leave blank to use the org default.
+  license-install-command: ""        # Installs production dependencies before the
+                                     # licence scan, so Trivy can read licences that lock
+                                     # files don't carry (pip, pnpm, Yarn, Go).
+                                     # Blank = scan lock files only (with a warning).
+                                     # See "License compliance only" below.
 
   # ── Secret scanning ────────────────────────────────────────────────────
   secret-scan-full-history: false    # Set true to force a full git history scan.
@@ -300,9 +322,12 @@ with:
   docker-targets: ""                 # Monorepo: explicit JSON array of {dockerfile, context?, image-name?}
                                      # (mutually exclusive with dockerfile; disables auto-detect)
   docker-exclude: ""                 # Extra path globs to skip during auto-detect (comma/space-separated)
-  docker-context: ""                 # Build context for the single `dockerfile` path
-  docker-image-name: ""              # CI image tag (default: per-target orion-docker-check-<id>:ci)
-  docker-trivy-severity: "CRITICAL,HIGH"
+  docker-context: ""                 # Build context for `dockerfile`, or for the one
+                                     # Dockerfile auto-detect finds (ignored with a
+                                     # warning if it finds several — use docker-targets)
+  docker-image-name: ""              # CI image tag, same scope as docker-context
+                                     # (default: per-target orion-docker-check-<id>:ci)
+  docker-trivy-severity: "CRITICAL,HIGH"  # also sets the Grype cutoff (its lowest level)
   docker-trivy-ignore-unfixed: false  # true = ignore CVEs with no upstream fix yet
   docker-dive-enable: true
   docker-dive-min-efficiency: 0.9    # Dive layer efficiency threshold (0.0–1.0)
@@ -366,7 +391,7 @@ project's check (e.g. `SonarCloud (…-web)`, `SonarCloud (…-api)`) as require
 | Event | Secret Scan | SonarCloud | License | Docker pipeline | Release Please | SBOM |
 |-------|:-----------:|:----------:|:-------:|:-----------------:|:--------------:|:----:|
 | `pull_request` | ✅ diff only | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
-| `push` to `main` | ✅ delta | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | ✅ (if `release-type` set) | ✅ |
+| `push` to `main` | ✅ delta | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | ✅ (if `release-type` set; currently disabled) | ✅ |
 | `push` to other branch | ✅ delta | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
 | `release` created | ✅ delta | ✅ (if project key set) | — (skipped) | ✅ if Dockerfile found | — | ✅ (attach to release) |
 | `schedule` (weekly) | ✅ full history | ✅ (if project key set) | ✅ | ✅ if Dockerfile found | — | — |
@@ -397,7 +422,7 @@ jobs:
       GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 ```
 
-Add a `.gitleaks.toml` file to your repository root to allowlist known false positives.
+Add a `.gitleaks.toml` file to your repository root to allowlist known false positives (on pull requests it is read from the base branch — see [Gitleaks allowlist](#gitleaks-allowlist-per-repository)). The Gitleaks download is verified against the release's SHA-256 checksums file before it is installed, and a Gitleaks crash is reported as a failed scan, separately from a secret finding.
 
 #### Docker best practices only
 
@@ -422,6 +447,8 @@ jobs:
 ```
 
 The orchestrator already includes Dockerfile detection and this workflow; use the standalone call only for repos that want Docker checks without the rest of Orion CI.
+
+`hadolint-ignore` (standalone call only) accepts rule IDs separated by commas or spaces (e.g. `DL3008,SC2035` or `DL3008 SC2035`). When `grype-enable` is true, Grype fails at the **lowest** severity listed in `trivy-severity` (the default `CRITICAL,HIGH` gives `high`), so both scanners gate on the same range.
 
 #### SonarCloud only
 
@@ -458,10 +485,23 @@ jobs:
   license:
     uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
     with:
-      forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"   # optional override
+      forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"   # optional override; blank = default list
+      install-command: "npm ci --omit=dev --ignore-scripts"   # optional, see below
 ```
 
 With default inputs, findings are also sent to the repository **Security → Code scanning** view via SARIF upload (this is why the caller grants `security-events: write`).
+
+**Install command.** Lock files carry licence data only for npm (`package-lock.json`). For pip, pnpm, Yarn and Go, Trivy reads licences from installed packages, so set `install-command` (orchestrator: `license-install-command`) to install production dependencies where Trivy looks. Without it the job emits a warning and the licence gate may pass without checking those dependencies. The command runs from the repository root; prefix `cd <dir> &&` for a project in a subdirectory.
+
+| Ecosystem | Where Trivy looks | Example `install-command` |
+|---|---|---|
+| pip (`requirements.txt`) | site-packages of the venv in `$VIRTUAL_ENV` (the runner's system Python has none), so create a venv and export `VIRTUAL_ENV` via `$GITHUB_ENV` | `python3 -m venv "$RUNNER_TEMP/venv" && "$RUNNER_TEMP/venv/bin/pip" install -r requirements.txt && echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"` |
+| pnpm | `node_modules` next to `pnpm-lock.yaml`, inside `scan-path` | `corepack enable && pnpm install --frozen-lockfile --prod --ignore-scripts` |
+| Yarn Classic | `node_modules` next to `yarn.lock`, inside `scan-path` | `yarn install --frozen-lockfile --production --ignore-scripts` |
+| Yarn 2+ | `.yarn/cache` (or `.yarn/unplugged`) next to `yarn.lock`; turn off Yarn 4's global cache | `corepack enable && YARN_ENABLE_GLOBAL_CACHE=false yarn install --immutable` |
+| Go | `vendor/` next to `go.mod`, or `$GOPATH/pkg/mod` (a custom `GOMODCACHE` is not read) | `go mod download` |
+
+Pipenv, Poetry and uv lock files get no licence data from Trivy at all.
 
 #### SBOM generation only
 
@@ -483,7 +523,7 @@ jobs:
 
 #### Release Please only
 
-No secrets are needed.
+No secrets are needed by default. Optionally pass a GitHub App so Release PRs and releases trigger other workflows (see `RELEASE_APP_PRIVATE_KEY` under [Other org secrets](#other-org-secrets)).
 
 ```yaml
 permissions:
@@ -494,8 +534,13 @@ jobs:
   release:
     uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
     with:
-      release-type: python    # required
+      release-type: python    # required (or manifest-mode: true)
+      app-id: ${{ vars.RELEASE_APP_ID }}   # optional — GitHub App token
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}   # optional, with app-id
 ```
+
+The `changelog-path`, `changelog-types` and `version-file` inputs are **deprecated**: release-please-action v4 ignores them (the workflow warns if you set one). Configure the changelog path, changelog sections and extra files in `release-please-config.json` instead, using `manifest-mode: true` (a single package is just the `"."` entry).
 
 #### Chaining release outputs to a deploy job
 
@@ -538,7 +583,7 @@ The report opens with a **Pipeline Dashboard** — a single at-a-glance table sh
 
 | Section | What it shows |
 |---------|---------------|
-| **Pipeline Dashboard** | Overall pass/fail banner, run metadata (trigger, commit, runner, run link), one-row status + detail per stage (including Docker), quick-navigation links |
+| **Pipeline Dashboard** | Overall pass/fail banner, run metadata (trigger, commit, runner, run link), one-row status + detail per stage (including the plan job and Docker; a failed plan flags invalid caller inputs and points to its job log), quick-navigation links |
 | **Secret Scanning** | Pass/fail, scan type (delta/full), Gitleaks version, findings table with severity/file/line/rule/description/commit link (secrets are redacted), remediation guidance |
 | **SonarCloud** | Quality Gate status, failed gate conditions (expanded when failing), overall metrics table (bugs, vulnerabilities, hotspots, code smells, coverage, duplications, LOC, technical debt as human-readable time, A–E ratings), new code metrics, issue severity breakdown by level, top 15 open issues with severity/type/message/file/line/effort, security hotspots requiring review |
 | **License Compliance** | Pass/fail, packages scanned, forbidden license list in use, violations table with package/version/license/category/severity/source file, full license inventory (collapsed) |
@@ -548,7 +593,7 @@ The report opens with a **Pipeline Dashboard** — a single at-a-glance table sh
 
 ### SonarCloud Detail
 
-The detailed SonarCloud blocks in the Summary are built with **`SONAR_ISSUE_RETRIEVAL`** (not `SONAR_TOKEN`). The report renders **one collapsible block per project** (with an `N/M Quality Gates passed` rollup), issuing these four Web API calls for each:
+The detailed SonarCloud blocks in the Summary are built with **`SONAR_ISSUE_RETRIEVAL`** (not `SONAR_TOKEN`). The report renders **one collapsible block per project** (with an `N/M Quality Gates passed` rollup), issuing these four Web API calls for each. The calls are scoped to the analysis that was just scanned: the pull request (`pullRequest=<n>`) on a `pull_request` run, the branch (`branch=<name>`) on a push to a non-main branch, and the main branch otherwise.
 
 | API | What it provides |
 |-----|-----------------|
@@ -689,6 +734,8 @@ To allowlist a known false positive secret pattern, add a `.gitleaks.toml` to yo
   regexes = ['''example-key-do-not-use''']
   paths = ['''tests/fixtures/''']
 ```
+
+On **pull requests**, `.gitleaks.toml` and `.gitleaksignore` are read from the **base branch**, not the PR head, so a PR cannot allowlist its own secret: a new or changed allowlist takes effect only once it is merged. Inline `gitleaks:allow` comments in the PR's own lines are still honoured, so reviewers should watch for them. Other events use the checked-out files.
 
 ### SonarCloud exclusions (per repository)
 

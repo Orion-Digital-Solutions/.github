@@ -114,7 +114,7 @@ on:
         default: "v2.12.0"
 
       hadolint-ignore:
-        description: "Space-separated Hadolint rule IDs to ignore (e.g. DL3008 SC2035)"
+        description: "Hadolint rule IDs to ignore, comma- or space-separated (e.g. DL3008,SC2035)"
         required: false
         type: string
         default: ""
@@ -298,13 +298,26 @@ jobs:
       #   • WORKDIR usage instead of cd (DL3003)
       #   • Package manager cache cleanup (DL3009 / DL3015)
       #   • Shell best-practices via ShellCheck integration (SC*)
+      #
+      # hadolint-action expects a comma-separated ignore list, but callers may
+      # pass spaces, commas or newlines. Normalise to "DL3008,DL3009" first.
+      - name: Normalise Hadolint ignore list
+        id: hadolint-ignore
+        shell: bash
+        env:
+          RAW_IGNORE: ${{ inputs.hadolint-ignore }}
+        run: |
+          IGNORE=$(printf '%s' "${RAW_IGNORE}" | tr ', \t\r\n' '\n' | sed '/^$/d' | paste -sd, -)
+          echo "Hadolint ignore list: ${IGNORE:-<none>}"
+          echo "ignore=${IGNORE}" >> "$GITHUB_OUTPUT"
+
       - name: Hadolint — Dockerfile lint
         id: hadolint
         continue-on-error: true
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile:  ${{ inputs.dockerfile }}
-          ignore:      ${{ inputs.hadolint-ignore }}
+          ignore:      ${{ steps.hadolint-ignore.outputs.ignore }}
           format:      sarif
           output-file: hadolint.sarif
           no-fail:     false
@@ -442,7 +455,6 @@ jobs:
       - name: Build Docker image
         shell: bash
         env:
-          DOCKERFILE: ${{ inputs.context }}
           CONTEXT:    ${{ inputs.context }}
           IMAGE_NAME: ${{ steps.meta.outputs.image-name }}
           BUILD_ARGS: ${{ inputs.build-args }}
@@ -604,8 +616,11 @@ jobs:
           output:          trivy-report.json
 
       # ── Trivy — SARIF output (GitHub Security tab) ────────────────────────
+      # SARIF is supplementary; it must never fail the job. The scan verdict
+      # comes from the table step above.
       - name: Trivy — vulnerability scan (SARIF)
         if: inputs.upload-sarif && !cancelled() && steps.sarif-preflight.outputs.available == 'true'
+        continue-on-error: true
         uses: aquasecurity/trivy-action@v0.35.0
         with:
           image-ref:       ${{ needs.build.outputs.image-name }}
@@ -629,6 +644,27 @@ jobs:
       # Grype excels at scanning against SBOMs and can catch CVEs that Trivy
       # may miss in certain language ecosystems. Disabled by default to avoid
       # doubling scan time on every run.
+      #
+      # Grype takes a single minimum severity, not a list. Use the LOWEST level
+      # in trivy-severity so both scanners gate on the same range (the default
+      # CRITICAL,HIGH resolves to "high"; nothing recognised also means "high").
+      - name: Resolve Grype severity cutoff
+        id: grype-cutoff
+        if: inputs.grype-enable
+        shell: bash
+        env:
+          SEVERITY: ${{ inputs.trivy-severity }}
+        run: |
+          LIST=",$(printf '%s' "${SEVERITY}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]'),"
+          CUTOFF=high
+          for pair in UNKNOWN:negligible LOW:low MEDIUM:medium HIGH:high CRITICAL:critical; do
+            case "${LIST}" in
+              *",${pair%%:*},"*) CUTOFF="${pair#*:}"; break ;;
+            esac
+          done
+          echo "Grype severity cutoff: ${CUTOFF} (from trivy-severity '${SEVERITY}')"
+          echo "cutoff=${CUTOFF}" >> "$GITHUB_OUTPUT"
+
       - name: Grype — vulnerability scan
         id: grype
         if: inputs.grype-enable
@@ -637,7 +673,7 @@ jobs:
         with:
           image:           ${{ needs.build.outputs.image-name }}
           fail-build:      true
-          severity-cutoff: high
+          severity-cutoff: ${{ steps.grype-cutoff.outputs.cutoff }}
           output-format:   sarif
 
       - name: Upload Grype SARIF
@@ -844,6 +880,9 @@ jobs:
       #   • Per-layer file-system delta
       # CI mode exits non-zero when efficiency < lowestEfficiency threshold.
       # The Docker socket is mounted so Dive can introspect the local daemon.
+      # bash runs with -eo pipefail, so Dive's non-zero exit survives the tee
+      # and fails this (continue-on-error) step; the later "Fail if efficiency
+      # below threshold" step reads steps.dive.outcome.
       - name: Dive — image efficiency check
         id: dive
         continue-on-error: true
@@ -858,7 +897,6 @@ jobs:
             wagoodman/dive:latest \
             --ci-config /.dive-ci.yaml \
             "${IMAGE_NAME}" 2>&1 | tee dive-output.txt
-          echo "dive_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       # ── Job summary ────────────────────────────────────────────────────────
       - name: Dive efficiency summary

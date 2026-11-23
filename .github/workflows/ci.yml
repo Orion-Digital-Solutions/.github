@@ -48,15 +48,16 @@ name: Orion CI Orchestrator (Reusable)
 #                           docker-build-image: true (default false — built in CD).
 #
 #   Phase 2 — after Phase 1 (exact needs differ per job):
-#     release-please  needs [secret-scan, sonarcloud, license-check, docker-lint]
+#     release-please  needs [plan, secret-scan, sonarcloud, license-check, docker-lint]
 #                       only on push to main (+ release-type OR release-manifest set);
 #                       opens/updates Release PR (single-package or monorepo manifest mode)
 #                       *** TEMPORARILY DISABLED org-wide (2026-06-06) — see the
 #                       `false &&` guard on the release-please job to re-enable. ***
-#     sbom            needs [secret-scan, sonarcloud, license-check, docker-lint]
+#     sbom            needs [plan, secret-scan, sonarcloud, license-check, docker-lint]
 #                       on push to main OR release event. Uses if: always() with a
 #                       failure/cancelled guard, so a skipped job (release-event license,
-#                       no Sonar key, no Dockerfile) does not block it — only a real failure does.
+#                       no Sonar key, no Dockerfile) does not block it — only a real failure
+#                       does (including a failed plan, i.e. malformed caller inputs).
 #
 #   Also — inside release-please reusable workflow (when a release is created):
 #     post-release    may attach SPDX + CycloneDX via anchore/sbom-action when
@@ -66,12 +67,20 @@ name: Orion CI Orchestrator (Reusable)
 #     report  (Actions Summary — SonarCloud Web API via SONAR_ISSUE_RETRIEVAL,
 #              plus Gitleaks + license + docker-vuln JSON artifacts)
 #
+#   Child workflows are referenced by RELATIVE path (./.github/workflows/<file>.yml),
+#   which GitHub resolves to the same commit as this file — so a caller pinned to
+#   a tag or SHA gets the orchestrator AND its children from that one commit.
+#
 # ── What runs and when (caller triggers the orchestrator) ─────────────────────
 #   pull_request     →  Phase 1 + docker-lint (if Dockerfile) + report (release + sbom skipped)
+#                       report shows the PR's SonarCloud analysis (pullRequest=<n>)
 #   push (main)      →  Phase 1 + docker-lint (if Dockerfile) + release-please + sbom + report
 #   push (other)     →  Phase 1 + docker-lint (if Dockerfile) + report
+#                       report shows that branch's SonarCloud analysis (branch=<name>)
 #   release created  →  secret-scan + sonar (if key) + docker-lint (if Dockerfile) + sbom + report
 #   schedule         →  Phase 1 + docker-lint (if Dockerfile) + report
+#   A failed plan (malformed inputs) skips the matrix jobs, release-please and sbom,
+#   and turns the report banner red.
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -171,6 +180,12 @@ on:
         type: boolean
         default: false
 
+      release-app-id:
+        description: "App ID of the GitHub App used to mint the Release Please token (with the RELEASE_APP_PRIVATE_KEY secret), so its PRs and releases trigger other workflows. Leave blank to use GITHUB_TOKEN."
+        required: false
+        type: string
+        default: ""
+
       main-branch:
         description: "Name of the default/main branch"
         required: false
@@ -179,6 +194,12 @@ on:
 
       forbidden-licenses:
         description: "Comma-separated SPDX license IDs to treat as violations (overrides org default)"
+        required: false
+        type: string
+        default: ""
+
+      license-install-command:
+        description: "Command that installs production dependencies before the licence scan, so Trivy can read licences that lock files don't carry (pip, pnpm, Yarn, Go). Leave blank to scan lock files only."
         required: false
         type: string
         default: ""
@@ -208,7 +229,7 @@ on:
         default: ""
 
       docker-context:
-        description: "Docker build context. Leave blank to use the detected Dockerfile's directory (repo root for a root Dockerfile)."
+        description: "Docker build context for `dockerfile`, or for the Dockerfile auto-detection finds when it finds exactly one (ignored with a warning when it finds several — use docker-targets). Leave blank to use the Dockerfile's directory (repo root for a root Dockerfile)."
         required: false
         type: string
         default: ""
@@ -235,7 +256,7 @@ on:
         default: ""
 
       docker-image-name:
-        description: "Name and tag for the CI image (e.g. myapp:ci). Defaults to 'orion-docker-check:ci'."
+        description: "Name and tag for the CI image (e.g. myapp:ci) of `dockerfile`, or of the Dockerfile auto-detection finds when it finds exactly one (ignored with a warning when it finds several — use docker-targets). Defaults to 'orion-docker-check-<target-id>:ci'."
         required: false
         type: string
         default: ""
@@ -303,6 +324,9 @@ on:
       AZURE_NPM_TOKEN:
         description: "Read-only npm registry token mounted as a BuildKit secret when docker-build-image is true"
         required: false
+      RELEASE_APP_PRIVATE_KEY:
+        description: "Private key of the GitHub App named by release-app-id (mints the Release Please token)"
+        required: false
 
 # Least privilege by default: every job reads only. Jobs that call a reusable
 # workflow raise this to exactly what that workflow's jobs request.
@@ -320,7 +344,7 @@ jobs:
     # read-only: Gitleaks only reads the checkout
     permissions:
       contents: read
-    uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@main
+    uses: ./.github/workflows/secret-scanning.yml
     with:
       full-scan: ${{ inputs.secret-scan-full-history || github.event_name == 'schedule' }}
       runner:    ${{ inputs.runner }}
@@ -343,7 +367,7 @@ jobs:
     # read-only: PR decoration uses SONAR_TOKEN, not the GitHub token
     permissions:
       contents: read
-    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
+    uses: ./.github/workflows/sonarcloud.yml
     with:
       project-key:            ${{ matrix.proj.key }}
       project-name:           ${{ matrix.proj.project-name }}
@@ -368,9 +392,10 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
+    uses: ./.github/workflows/license-compliance.yml
     with:
       forbidden-licenses: ${{ inputs.forbidden-licenses }}
+      install-command:    ${{ inputs.license-install-command }}
       runner:             ${{ inputs.runner }}
 
   # ── Plan: resolve Sonar projects + Docker targets (single OR monorepo) ──────
@@ -521,21 +546,41 @@ jobs:
               | sort -k1,1n -k2 | cut -f2- | sed 's|^\./||' \
               | grep -viE '(^|/)(examples|test|tests|fixtures|docs)(/|$)' || true)
 
+            # Split docker-exclude (comma- or space-separated) into an array with
+            # globbing off, so a pattern like samples/* is not expanded against
+            # the checkout before `case` matches it. (`case` pattern matching is
+            # unaffected by set -f, and its `*` also matches `/`.)
+            EXCLUDES=()
+            if [ -n "${DOCKER_EXCLUDE}" ]; then
+              set -f
+              read -ra EXCLUDES <<< "${DOCKER_EXCLUDE//,/ }"
+              set +f
+            fi
+
             while IFS= read -r f; do
               [ -z "$f" ] && continue
               skip=false
-              if [ -n "${DOCKER_EXCLUDE}" ]; then
-                for pat in ${DOCKER_EXCLUDE//,/ }; do
-                  # shellcheck disable=SC2254
-                  case "$f" in $pat) skip=true; break ;; esac
-                done
-              fi
+              for pat in "${EXCLUDES[@]}"; do
+                # shellcheck disable=SC2254
+                case "$f" in $pat) skip=true; break ;; esac
+              done
               if [ "$skip" = true ]; then echo "  - skip (docker-exclude): $f"; continue; fi
               if [[ "$f" == */* ]]; then CTX=$(dirname "$f"); else CTX="."; fi
               TID=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]' | sed -e 's|[^a-z0-9]\+|-|g' -e 's|^-||' -e 's|-$||')
               DOCKER_JSON=$(printf '%s' "${DOCKER_JSON}" | jq -c --arg df "$f" --arg ctx "$CTX" --arg tid "$TID" \
                 '. + [{dockerfile:$df, context:$ctx, "image-name":"", "target-id":$tid}]')
             done <<< "${CANDIDATES}"
+
+            # docker-context / docker-image-name apply only when detection finds
+            # exactly one Dockerfile; with several they are ambiguous.
+            AUTO_COUNT=$(printf '%s' "${DOCKER_JSON}" | jq 'length')
+            if [ "${AUTO_COUNT}" -eq 1 ]; then
+              DOCKER_JSON=$(printf '%s' "${DOCKER_JSON}" | jq -c --arg ctx "${DOCKER_CONTEXT}" --arg img "${DOCKER_IMAGE}" '
+                .[0] |= ( (if $ctx != "" then .context = $ctx else . end)
+                        | (if $img != "" then ."image-name" = $img else . end) )')
+            elif [ "${AUTO_COUNT}" -gt 1 ] && { [ -n "${DOCKER_CONTEXT}" ] || [ -n "${DOCKER_IMAGE}" ]; }; then
+              echo "::warning::Auto-detection found ${AUTO_COUNT} Dockerfiles, so 'docker-context' and 'docker-image-name' are ignored. Use 'docker-targets' to set a context or image name per Dockerfile."
+            fi
           fi
           DOCKER_COUNT=$(printf '%s' "${DOCKER_JSON}" | jq 'length')
           {
@@ -567,7 +612,7 @@ jobs:
       actions: read
       id-token: write
       attestations: write
-    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+    uses: ./.github/workflows/docker-lint.yml
     with:
       dockerfile:             ${{ matrix.tgt.dockerfile }}
       context:                ${{ matrix.tgt.context }}
@@ -590,7 +635,7 @@ jobs:
 
   release-please:
     name: Release Please
-    needs: [secret-scan, sonarcloud, license-check, docker-lint]
+    needs: [plan, secret-scan, sonarcloud, license-check, docker-lint]
     # ── TEMPORARILY DISABLED org-wide (2026-06-06) ───────────────────────────
     # Release automation is paused until every consuming repo is migrated to the
     # caller inputs (release-type / release-manifest). The job stays defined so
@@ -609,17 +654,20 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@main
+    uses: ./.github/workflows/release-please.yml
     with:
       release-type:             ${{ inputs.release-type }}
       manifest-mode:            ${{ inputs.release-manifest }}
       target-branch:            ${{ inputs.main-branch }}
       generate-sbom-on-release: true
+      app-id:                   ${{ inputs.release-app-id }}
       runner:                   ${{ inputs.runner }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   sbom:
     name: SBOM Generation
-    needs: [secret-scan, sonarcloud, license-check, docker-lint]
+    needs: [plan, secret-scan, sonarcloud, license-check, docker-lint]
     if: >-
       always() &&
       (
@@ -633,7 +681,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
-    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
+    uses: ./.github/workflows/sbom.yml
     with:
       attach-to-release: ${{ github.event_name == 'release' }}
       runner:            ${{ inputs.runner }}
@@ -693,6 +741,11 @@ jobs:
       # ./sonar-data/<slug>/. The loop body is constant-size bash and all the
       # JSON arrives via env, so the step stays well under the 21k-char limit.
       # Report APIs use SONAR_ISSUE_RETRIEVAL only — SONAR_TOKEN is for the scan.
+      # Every query is scoped to the analysis this run produced: &pullRequest=<n>
+      # on a PR, &branch=<name> on a push to a non-main branch, nothing (the main
+      # branch) otherwise. The same scope is exported as SONAR_QS for the
+      # dashboard links. SONAR_FETCHED=false (with SONAR_FETCH_NOTE) tells the
+      # later steps to fall back to the job result instead of printing 0/N.
       - name: Fetch SonarCloud data
         id: sonar-fetch
         if: always()
@@ -701,13 +754,31 @@ jobs:
           RESULT_SONAR:           ${{ needs.sonarcloud.result }}
           SONAR_ISSUE_RETRIEVAL:  ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
           SONAR_PROJECTS:         ${{ needs.plan.outputs.sonar-projects }}
+          EVENT:                  ${{ github.event_name }}
+          PR_NUMBER:              ${{ github.event.pull_request.number }}
+          REF_NAME:               ${{ github.ref_name }}
+          REF_TYPE:               ${{ github.ref_type }}
+          MAIN_BRANCH:            ${{ inputs.main-branch }}
         run: |
           set -uo pipefail
           SONAR_URL="https://sonarcloud.io"
           mkdir -p ./sonar-data
 
+          # Analysis scope (query-string suffix). Branch names are URL-encoded.
+          SONAR_QS=""
+          if [ "${EVENT}" = "pull_request" ] && [ -n "${PR_NUMBER:-}" ]; then
+            SONAR_QS="&pullRequest=${PR_NUMBER}"
+          elif [ "${EVENT}" = "push" ] && [ "${REF_TYPE}" = "branch" ] && [ "${REF_NAME}" != "${MAIN_BRANCH}" ]; then
+            SONAR_QS="&branch=$(jq -rn --arg b "${REF_NAME}" '$b | @uri')"
+          fi
+          echo "SonarCloud analysis scope: ${SONAR_QS:-(main branch)}"
+
           KEYS=$(printf '%s' "${SONAR_PROJECTS:-[]}" | jq -r '.[].key' 2>/dev/null || true)
-          TOTAL=0; PASS=0
+          TOTAL=0; PASS=0; FETCHED=0; NOTE=""
+
+          if [ -z "${SONAR_ISSUE_RETRIEVAL:-}" ]; then
+            NOTE="SONAR_ISSUE_RETRIEVAL not set"
+          fi
 
           if [ -n "${SONAR_ISSUE_RETRIEVAL:-}" ] && [ "${RESULT_SONAR}" != "skipped" ] && [ -n "${KEYS}" ]; then
 
@@ -745,22 +816,24 @@ jobs:
               for _ in $(seq 1 18); do
                 TASK_STATUS=$(curl -sf --max-time 10 \
                   -H "Authorization: Bearer ${SONAR_ISSUE_RETRIEVAL}" \
-                  "${SONAR_URL}/api/ce/component?component=${PROJECT_KEY}" \
+                  "${SONAR_URL}/api/ce/component?component=${PROJECT_KEY}${SONAR_QS}" \
                   2>/dev/null | jq -r '.current.status // "UNKNOWN"' 2>/dev/null || echo "UNKNOWN")
                 if [ "$TASK_STATUS" = "SUCCESS" ] || [ "$TASK_STATUS" = "FAILED" ]; then break; fi
                 sleep 5
               done
 
-              sonar_api "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}"                                                              > "$D/qg.json"
-              sonar_api "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}"                                              > "$D/measures.json"
-              sonar_api "${SONAR_URL}/api/issues/search?componentKeys=${PROJECT_KEY}&statuses=OPEN,CONFIRMED,REOPENED&ps=15&s=SEVERITY&asc=false&facets=types,severities" > "$D/issues.json"
-              sonar_api "${SONAR_URL}/api/hotspots/search?projectKey=${PROJECT_KEY}&ps=10&status=TO_REVIEW"                                                   > "$D/hotspots.json"
+              sonar_api "${SONAR_URL}/api/qualitygates/project_status?projectKey=${PROJECT_KEY}${SONAR_QS}"                                                              > "$D/qg.json"
+              sonar_api "${SONAR_URL}/api/measures/component?component=${PROJECT_KEY}&metricKeys=${METRIC_KEYS}${SONAR_QS}"                                              > "$D/measures.json"
+              sonar_api "${SONAR_URL}/api/issues/search?componentKeys=${PROJECT_KEY}&statuses=OPEN,CONFIRMED,REOPENED&ps=15&s=SEVERITY&asc=false&facets=types,severities${SONAR_QS}" > "$D/issues.json"
+              sonar_api "${SONAR_URL}/api/hotspots/search?projectKey=${PROJECT_KEY}&ps=10&status=TO_REVIEW${SONAR_QS}"                                                   > "$D/hotspots.json"
 
               ST=$(jq -r '.projectStatus.status // "UNKNOWN"' "$D/qg.json" 2>/dev/null || echo "UNKNOWN")
               [ "$ST" = "OK" ] && PASS=$((PASS+1))
+              [ "$ST" != "UNKNOWN" ] && FETCHED=$((FETCHED+1))
               printf '%s' "$ST" > "$D/qg_status.txt"
               echo "  ${PROJECT_KEY}: Quality Gate ${ST}"
             done <<< "${KEYS}"
+            [ "${FETCHED}" -eq 0 ] && NOTE="SonarCloud API returned no Quality Gate data"
           else
             # Data can't be fetched (no token / skipped) — still count projects for the dashboard.
             TOTAL=$(printf '%s' "${SONAR_PROJECTS:-[]}" | jq 'length' 2>/dev/null || echo 0)
@@ -769,6 +842,9 @@ jobs:
           {
             echo "SONAR_TOTAL=${TOTAL}"
             echo "SONAR_PASS=${PASS}"
+            [ "${FETCHED}" -gt 0 ] && echo "SONAR_FETCHED=true" || echo "SONAR_FETCHED=false"
+            echo "SONAR_FETCH_NOTE=${NOTE}"
+            echo "SONAR_QS=${SONAR_QS}"
           } >> "$GITHUB_ENV"
 
       # ── Step 2: Header + dashboard table ────────────────────────────────
@@ -776,12 +852,14 @@ jobs:
         if: always()
         shell: bash
         env:
+          RESULT_PLAN:     ${{ needs.plan.result }}
           RESULT_SECRET:   ${{ needs.secret-scan.result }}
           RESULT_SONAR:    ${{ needs.sonarcloud.result }}
           RESULT_LICENSE:  ${{ needs.license-check.result }}
           RESULT_RELEASE:  ${{ needs.release-please.result }}
           RESULT_SBOM:     ${{ needs.sbom.result }}
           RESULT_DOCKER:   ${{ needs.docker-lint.result }}
+          SONAR_COUNT:     ${{ needs.plan.outputs.sonar-count }}
           RELEASE_CREATED: ${{ needs.release-please.outputs.release-created }}
           RELEASE_TAG:     ${{ needs.release-please.outputs.tag-name }}
           EVENT:           ${{ github.event_name }}
@@ -809,7 +887,7 @@ jobs:
           }
 
           OVERALL_PASS=true
-          for r in "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM" "$RESULT_DOCKER"; do
+          for r in "$RESULT_PLAN" "$RESULT_SECRET" "$RESULT_SONAR" "$RESULT_LICENSE" "$RESULT_RELEASE" "$RESULT_SBOM" "$RESULT_DOCKER"; do
             { [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; } && OVERALL_PASS=false && break
           done
           [ "$OVERALL_PASS" = "true" ] \
@@ -817,6 +895,14 @@ jobs:
             || BANNER="## ❌ Orion CI — One or More Checks Failed"
 
           # One-line detail per stage
+          if [ "$RESULT_PLAN" = "success" ]; then
+            PD="${SONAR_COUNT:-0} SonarCloud project(s), ${DOCKER_TOTAL:-0} Docker target(s)"
+          elif [ "$RESULT_PLAN" = "failure" ]; then
+            PD="Invalid caller inputs — see the Resolve CI plan job log (dependent jobs skipped)"
+          else
+            PD="$(status_icon "$RESULT_PLAN")"
+          fi
+
           GL_FILE="./reports/gitleaks/gitleaks-full-report.json"
           if   [ "$RESULT_SECRET" = "skipped" ]; then SD="Skipped"
           elif [ ! -f "$GL_FILE" ];              then SD="Report artifact unavailable"
@@ -825,10 +911,14 @@ jobs:
             [ "$N" -eq 0 ] && SD="No secrets detected" || SD="${N} secret(s) found — rotate credentials"
           fi
 
+          # Per-project counts only when the report could actually read SonarCloud;
+          # otherwise fall back to the job result (never a misleading "0/N passed").
+          SONAR_NOTE=""
+          [ -n "${SONAR_FETCH_NOTE:-}" ] && SONAR_NOTE=" (details unavailable: ${SONAR_FETCH_NOTE})"
           if   [ "$RESULT_SONAR" = "skipped" ];   then SND="Skipped — no project configured"
-          elif [ "${SONAR_TOTAL:-0}" -gt 0 ];     then SND="${SONAR_PASS:-0}/${SONAR_TOTAL} Quality Gate(s) passed"
-          elif [ "$RESULT_SONAR" = "success" ];   then SND="Quality Gate passed"
-          elif [ "$RESULT_SONAR" = "failure" ];   then SND="Quality Gate failed or scan error"
+          elif [ "${SONAR_FETCHED:-false}" = "true" ] && [ "${SONAR_TOTAL:-0}" -gt 0 ]; then SND="${SONAR_PASS:-0}/${SONAR_TOTAL} Quality Gate(s) passed"
+          elif [ "$RESULT_SONAR" = "success" ];   then SND="Quality Gate passed${SONAR_NOTE}"
+          elif [ "$RESULT_SONAR" = "failure" ];   then SND="Quality Gate failed or scan error${SONAR_NOTE}"
           else SND="$(status_icon "$RESULT_SONAR")"
           fi
 
@@ -895,6 +985,7 @@ jobs:
             echo ""
             echo "| Stage | Status | Details |"
             echo "|-------|--------|---------|"
+            echo "| 🧭 Resolve CI plan | $(status_icon "$RESULT_PLAN") | ${PD} |"
             echo "| 🔐 Secret Scanning | $(status_icon "$RESULT_SECRET") | ${SD} |"
             echo "| 🔍 SonarCloud | ${SONAR_ST} | ${SND} |"
             echo "| ⚖️ License Compliance | $(status_icon "$RESULT_LICENSE") | ${LD} |"
@@ -978,7 +1069,6 @@ jobs:
         env:
           RESULT_SONAR:          ${{ needs.sonarcloud.result }}
           SONAR_PROJECTS:        ${{ needs.plan.outputs.sonar-projects }}
-          SONAR_ISSUE_RETRIEVAL: ${{ secrets.SONAR_ISSUE_RETRIEVAL }}
           REPO:                  ${{ github.repository }}
           SERVER_URL:            ${{ github.server_url }}
           SHA:                   ${{ github.sha }}
@@ -1010,11 +1100,12 @@ jobs:
               "${D}/measures.json" 2>/dev/null || true)
             [ -n "$v" ] && echo "$v" || echo "N/A"
           }
-          # New-code period value (only set when a new-code period exists)
+          # New-code period value (only set when a new-code period exists; the API
+          # returns it as `periods[0]` or, e.g. for a pull request, as `period`)
           mn() {
             local v
             v=$(jq -r --arg k "$1" \
-              '.component.measures[]? | select(.metric==$k) | .periods[0].value // ""' \
+              '.component.measures[]? | select(.metric==$k) | (.periods[0].value // .period.value // "")' \
               "${D}/measures.json" 2>/dev/null || true)
             [ -n "$v" ] && echo "$v" || echo "N/A"
           }
@@ -1025,8 +1116,8 @@ jobs:
 
             if [ "$RESULT_SONAR" = "skipped" ]; then
               echo "⏭️ _Skipped — no SonarCloud project configured_"
-            elif [ -z "${SONAR_ISSUE_RETRIEVAL:-}" ]; then
-              echo "$([ "$RESULT_SONAR" = "success" ] && echo "✅" || echo "⚠️") _SonarCloud data not available in report step — check the \`SONAR_ISSUE_RETRIEVAL\` secret_"
+            elif [ "${SONAR_FETCHED:-false}" != "true" ]; then
+              echo "$([ "$RESULT_SONAR" = "success" ] && echo "✅ Quality Gate passed" || echo "⚠️ Quality Gate failed or scan error") — _details unavailable (${SONAR_FETCH_NOTE:-no data fetched}); check the \`SONAR_ISSUE_RETRIEVAL\` secret_"
             else
               echo "**${SONAR_PASS:-0}/${SONAR_TOTAL:-0} project Quality Gate(s) passed**"
               echo ""
@@ -1041,7 +1132,7 @@ jobs:
 
                 echo "<details><summary>${QG_ICON} — <code>${PROJECT_KEY}</code></summary>"
                 echo ""
-                echo "[View in SonarCloud](${SONAR_URL}/project/overview?id=${PROJECT_KEY})"
+                echo "[View in SonarCloud](${SONAR_URL}/project/overview?id=${PROJECT_KEY}${SONAR_QS:-})"
                 echo ""
 
                 FAILED_CONDS=$(jq -r '
@@ -1118,7 +1209,7 @@ jobs:
               IT=$(jq '.total // 0'     "$D/issues.json" 2>/dev/null || echo 0)
               REPO_URL="${SERVER_URL}/${REPO}"
               if [ "${IC:-0}" -eq 0 ] && [ "$QG_STATUS" != "OK" ]; then
-                echo "> No individual issues were returned from the API. The Quality Gate may have failed due to metric thresholds (e.g. coverage, ratings). Check the [SonarCloud dashboard](${SONAR_URL}/project/issues?id=${PROJECT_KEY}) for details."
+                echo "> No individual issues were returned from the API. The Quality Gate may have failed due to metric thresholds (e.g. coverage, ratings). Check the [SonarCloud dashboard](${SONAR_URL}/project/issues?id=${PROJECT_KEY}${SONAR_QS:-}) for details."
                 echo ""
               fi
               if [ "${IC:-0}" -gt 0 ]; then
@@ -1139,7 +1230,7 @@ jobs:
                   end
                 ' "$D/issues.json" 2>/dev/null | head -15
                 echo ""
-                [ "${IT:-0}" -gt 15 ] && echo "_...and $((IT-15)) more. [View all in SonarCloud](${SONAR_URL}/project/issues?id=${PROJECT_KEY})._" && echo ""
+                [ "${IT:-0}" -gt 15 ] && echo "_...and $((IT-15)) more. [View all in SonarCloud](${SONAR_URL}/project/issues?id=${PROJECT_KEY}${SONAR_QS:-})._" && echo ""
                 echo "</details>"
                 echo ""
               fi
@@ -1163,7 +1254,7 @@ jobs:
                   end
                 ' "$D/hotspots.json" 2>/dev/null | head -10
                 echo ""
-                [ "${HT:-0}" -gt 10 ] && echo "_...and $((HT-10)) more. [Review all hotspots](${SONAR_URL}/project/security_hotspots?id=${PROJECT_KEY})._" && echo ""
+                [ "${HT:-0}" -gt 10 ] && echo "_...and $((HT-10)) more. [Review all hotspots](${SONAR_URL}/project/security_hotspots?id=${PROJECT_KEY}${SONAR_QS:-})._" && echo ""
                 echo "</details>"
                 echo ""
               fi

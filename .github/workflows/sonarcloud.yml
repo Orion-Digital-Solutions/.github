@@ -184,10 +184,30 @@ jobs:
           BASE_DIR: ${{ inputs.base-dir }}
         run: |
           VERSION="${NODE_VERSION_INPUT}"
-          if [ -z "${VERSION}" ] && git -C "${BASE_DIR:-.}" ls-files -- \
-              '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' '*.mts' '*.cts' \
-              '*.vue' '*.css' '*.scss' '*.sass' '*.less' | grep -q .; then
-            VERSION="lts/*"
+          # Written to $GITHUB_OUTPUT as ONE key=value line: trim trailing
+          # newlines (YAML block scalars), then reject any embedded newline/CR,
+          # which could inject extra output keys (same rule as step 3).
+          while [[ "${VERSION}" == *$'\n' || "${VERSION}" == *$'\r' ]]; do VERSION="${VERSION%?}"; done
+          case "${VERSION}" in
+            *$'\n'* | *$'\r'*)
+              echo "::error::Input 'node-version' must not contain a newline or carriage return."
+              exit 1
+              ;;
+          esac
+          if [ -z "${VERSION}" ]; then
+            # Capture the list instead of piping into `grep -q`: under
+            # pipefail, grep exiting at the first match can kill git with
+            # SIGPIPE (exit 141) on large repos and turn a match into "no JS".
+            # A git error still means "no JS detected", as before.
+            if ! JS_FILES="$(git -C "${BASE_DIR:-.}" ls-files -- \
+                '*.js' '*.jsx' '*.mjs' '*.cjs' '*.ts' '*.tsx' '*.mts' '*.cts' \
+                '*.vue' '*.css' '*.scss' '*.sass' '*.less')"; then
+              echo "::warning::Could not list files in the base-dir; skipping JS/TS/CSS detection."
+              JS_FILES=""
+            fi
+            if [ -n "${JS_FILES}" ]; then
+              VERSION="lts/*"
+            fi
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Node.js for analysis: ${VERSION:-<none — no JS/TS/CSS detected>}"
