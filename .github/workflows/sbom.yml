@@ -82,6 +82,7 @@ jobs:
   sbom:
     name: Generate SBOM
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     # contents: write only to attach SBOMs to a release; id-token/attestations
     # are only used when attest: true (Sigstore OIDC signing + attestation store).
     permissions:

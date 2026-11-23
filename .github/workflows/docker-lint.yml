@@ -238,6 +238,7 @@ jobs:
   lint:
     name: Static Analysis & Linting
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     permissions:
       contents: read           # checkout
       security-events: write   # upload Hadolint/Checkov SARIF to the Security tab
@@ -426,6 +427,7 @@ jobs:
     name: Build Docker Image
     if: inputs.build-image
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
     # Read-only: this job executes the (possibly PR-supplied) Dockerfile.
     permissions:
       contents: read           # checkout
@@ -550,6 +552,7 @@ jobs:
     needs: [lint, build]
     if: inputs.build-image
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
     permissions:
       contents: read           # baseline read access
       security-events: write   # upload Trivy/Grype SARIF to the Security tab
@@ -757,6 +760,7 @@ jobs:
     needs: [lint, build]
     if: inputs.build-image && inputs.sbom-enable
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     permissions:
       contents: write          # attach SBOMs to GitHub Release assets (release event only)
       id-token: write          # Sigstore OIDC signing for the SBOM attestation (sbom-attest: true)
@@ -854,6 +858,7 @@ jobs:
     needs: [lint, build]
     if: inputs.build-image && inputs.dive-enable
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     permissions:
       contents: read           # baseline read access; Dive only inspects the local image
 

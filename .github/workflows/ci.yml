@@ -409,6 +409,7 @@ jobs:
   plan:
     name: Resolve CI plan
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
     # read-only: checks out the repo to auto-detect Dockerfiles
     permissions:
       contents: read
@@ -695,6 +696,7 @@ jobs:
     needs: [plan, secret-scan, sonarcloud, license-check, release-please, sbom, docker-lint]
     if: always()
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     # read-only: downloads this run's artifacts and writes the step summary
     permissions:
       contents: read

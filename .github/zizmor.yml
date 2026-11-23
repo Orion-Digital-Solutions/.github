@@ -1,0 +1,16 @@
+# zizmor configuration for this repository (schema: zizmor 1.33.1,
+# https://docs.zizmor.sh/configuration/ and
+# https://docs.zizmor.sh/audits/#unpinned-uses-configuration).
+#
+# Only one rule is tuned: our own reusable workflows may be referenced by a
+# tag or branch (`@v1`, `@main`), because callers are meant to follow the
+# moving major tag. Every other action must still be pinned to a commit SHA.
+# Nothing else is ignored or disabled.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Both spellings: GitHub treats owner names case-insensitively.
+        "orion-digital-solutions/*": ref-pin
+        "Orion-Digital-Solutions/*": ref-pin
+        "*": hash-pin

@@ -151,6 +151,7 @@ jobs:
   sonarcloud:
     name: SonarCloud Scan
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
     # Read-only: checkout needs contents. The scanner and Quality Gate talk to
     # SonarCloud with SONAR_TOKEN, and the same-run artifact download uses the
     # runtime token, so neither needs GITHUB_TOKEN scopes.

@@ -218,6 +218,7 @@ jobs:
   release-please:
     name: Release Please
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
     permissions:
       contents: write       # create tags and GitHub Releases (GITHUB_TOKEN fallback)
       pull-requests: write  # open and update Release PRs (GITHUB_TOKEN fallback)
@@ -325,6 +326,7 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release-created == 'true'
     runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
     permissions:
       contents: write       # attach SBOMs to the release as assets
 
