@@ -417,7 +417,7 @@ jobs:
     uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@main
     with:
       full-scan: false               # true = full history, false = delta (default)
-      gitleaks-version: "v8.18.4"   # optional — pin a specific version
+      gitleaks-version: "v8.30.1"   # optional — pin a specific version
     secrets:
       GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 ```
@@ -540,7 +540,7 @@ jobs:
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}   # optional, with app-id
 ```
 
-The `changelog-path`, `changelog-types` and `version-file` inputs are **deprecated**: release-please-action v4 ignores them (the workflow warns if you set one). Configure the changelog path, changelog sections and extra files in `release-please-config.json` instead, using `manifest-mode: true` (a single package is just the `"."` entry).
+The `changelog-path`, `changelog-types` and `version-file` inputs are **deprecated**: release-please-action (v4 and later) ignores them (the workflow warns if you set one). Configure the changelog path, changelog sections and extra files in `release-please-config.json` instead, using `manifest-mode: true` (a single package is just the `"."` entry).
 
 #### Chaining release outputs to a deploy job
 
@@ -759,6 +759,8 @@ Changes to `.github/workflows/` in this repository take effect **immediately** f
 2. Edit the relevant file under `.github/workflows/`.
 3. Open a PR against `main` — the PR description should clearly state the impact on all consuming repositories.
 4. Merge after review. All repos pick up the change automatically.
+
+Every third-party action, in the shared workflows and in the templates, is pinned to a full commit SHA with the version in a trailing comment (`uses: actions/checkout@<sha> # v7.0.1`), so a moved or hijacked tag cannot change what runs. Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml)) bumps the pins in `.github/workflows/` weekly, with a 7-day cool-down so a new release is at least a week old before it is proposed. Dependabot does not scan `workflow-templates/`: when you merge a Dependabot bump, update the same pins in the templates by hand.
 
 ### To add a new reusable workflow
 

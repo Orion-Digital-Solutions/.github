@@ -96,7 +96,7 @@ Upgrade in small groups, one pull request each, and test in the sandbox reposito
 | 3.3 | `actions/attest-sbom` | v3 | `actions/attest` v4.2.2 | `attest-sbom` is deprecated; inputs are compatible. | S | |
 | 3.4 | `googleapis/release-please-action` | v4 | v5.0.0 | Do together with 2.11. | S | |
 | 3.5 | `actions/checkout`, `download-artifact`, `setup-node`, `setup-python`, `setup-java`, `stale`, `dependency-review-action` | v6, v7, v6, v6, v5, v10, v4 | v7.0.1, v8.0.2, v7.1.0, v7.1.0, v6.3.0, v11.0.0, v5.0.1 | Read each major's release notes. | M | |
-| 3.6 | `docker/setup-buildx-action`, `hadolint/hadolint-action`, `aquasecurity/trivy-action` | v3, v3.1.0, v0.35.0 | v4.4.1, v3.5.0, v0.36.0 | `trivy-action` v0.35.0 was the one tag not hijacked in the March 2026 incident; the upgrade is routine, not urgent. | S | |
+| 3.6 | `docker/setup-buildx-action`, `hadolint/hadolint-action`, `aquasecurity/trivy-action` | v3, v3.1.0, v0.35.0 | v4.4.1, **v3.1.0 (held)**, v0.36.0 | `trivy-action` v0.35.0 was the one tag not hijacked in the March 2026 incident; the upgrade is routine, not urgent. **Hadolint held at v3.1.0 (Hadolint 2.12) in v1:** v3.5.0 ships Hadolint 2.15, whose new rules (e.g. DL3066 "non-numeric user-id", which flags `USER node`) would newly fail lint in caller repos. Adopt in `v2` with a default ignore list or communicated rule change. | S | |
 | 3.7 | `EndBug/label-sync` | v2 (last release February 2024) | Decide: keep, or replace with a short `gh label` script. | It declares the removed Node 20 runtime and now runs remapped on Node 24. | S | |
 
 Already current, no action: `actions/upload-artifact@v7`, `github/codeql-action@v4`, `SonarSource/sonarqube-scan-action@v8.5.0`, `sonarqube-quality-gate-action@v1.2.1`.

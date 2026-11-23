@@ -279,16 +279,15 @@ jobs:
       # unset), revoked automatically at the end of the job, narrowed to the
       # three permissions below. The App installation must grant all three
       # (see the header) or token creation fails.
-      # `app-id` is deprecated in v3 in favour of `client-id` (both are read
-      # into the same value and accept a Client ID or an App ID), but
-      # actionlint's bundled metadata does not know `client-id` yet; switch
-      # when it does.
+      # The action's own `app-id` input is deprecated in v3; `client-id` is
+      # read into the same value (main.js: getInput("client-id") ||
+      # getInput("app-id")), so this workflow's app-id input is passed here.
       - name: Create GitHub App token
         id: app-token
         if: steps.token-mode.outputs.use-app == 'true'
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
-          app-id:                   ${{ inputs.app-id }}
+          client-id:                ${{ inputs.app-id }}
           private-key:              ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents:      write
           permission-pull-requests: write
@@ -296,11 +295,11 @@ jobs:
 
       # Single-package mode — driven by release-type.
       # changelog-path / changelog-types are intentionally NOT passed:
-      # release-please-action v4 no longer has those inputs.
+      # release-please-action v4+ no longer has those inputs.
       - name: Run Release Please (single package)
         id: rp
         if: ${{ !inputs.manifest-mode && inputs.release-type != '' }}
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token:           ${{ steps.app-token.outputs.token || github.token }}
           release-type:    ${{ inputs.release-type }}
@@ -313,7 +312,7 @@ jobs:
       - name: Run Release Please (manifest / monorepo)
         id: rpm
         if: ${{ inputs.manifest-mode }}
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token:         ${{ steps.app-token.outputs.token || github.token }}
           config-file:   ${{ inputs.config-file }}
@@ -331,7 +330,7 @@ jobs:
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           ref: ${{ needs.release-please.outputs.tag-name }}
@@ -343,7 +342,7 @@ jobs:
       # are attached explicitly in the next step instead.
       - name: Generate SBOM — SPDX JSON
         if: inputs.generate-sbom-on-release
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path:                  "."
           format:                spdx-json
@@ -354,7 +353,7 @@ jobs:
 
       - name: Generate SBOM — CycloneDX JSON
         if: inputs.generate-sbom-on-release
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
         with:
           path:                  "."
           format:                cyclonedx-json
