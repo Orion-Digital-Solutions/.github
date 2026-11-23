@@ -134,5 +134,11 @@ fi
   echo "report-dir=${REPORT_DIR}"
   [ "${STATUS}" = ok ] && [ -s "${SARIF}" ] && echo "sarif=${SARIF}"
 } >> "${GITHUB_OUTPUT}"
-echo "Dependency scan: ${STATUS} (${VULN_COUNT:-unknown} vulnerabilities at ${SEVERITY})"
+# STATUS describes the scan run (ok = completed), not the verdict; the
+# verdict comes from the count in the composite's result step.
+if [ "${STATUS}" = ok ]; then
+  echo "Dependency scan completed: ${VULN_COUNT:-unknown} vulnerabilities at ${SEVERITY}"
+else
+  echo "Dependency scan did not complete (${STATUS})"
+fi
 exit 0
