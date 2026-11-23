@@ -1,10 +1,20 @@
 name: SonarCloud Analysis
 
+# Triggers: `push` runs only on the default branch, and `pull_request` covers
+# every other branch, so a commit on a branch with an open PR starts one run,
+# not two (and SonarCloud gets one PR analysis instead of a PR plus a branch
+# analysis). Add a long-lived branch (e.g. develop) to `push.branches` only if
+# it needs a SonarCloud branch analysis without an open PR.
 on:
   push:
-    branches: [main, develop]
-  pull_request:
     branches: [main]
+  pull_request:
+
+# A new commit on a PR cancels that PR's run still in progress. Other events
+# get their own group (the run id), so main-branch runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Token permissions: the maximum the shared workflow requests. GitHub
 # validates these at start-up, and each shared job narrows them further.
@@ -14,7 +24,7 @@ permissions:
 jobs:
   sonarcloud:
     name: SonarCloud
-    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@v1
     with:
       project-key: orion-digital-solutions_${{ github.event.repository.name }}
       # ── Uncomment and configure options as needed for this project ──────

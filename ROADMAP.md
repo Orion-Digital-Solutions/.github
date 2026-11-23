@@ -30,6 +30,17 @@ Drafted 23 November 2026 from a review of every workflow in this repository, che
 | Weekly schedule | Runs the full-history secret scan, the licence check, and the image CVE scan. Sonar and Docker lint are skipped. |
 | GitHub plan | Team. See "What the Team plan limits" below. |
 
+## Status
+
+| Phase | State |
+|---|---|
+| 1 | Done: [#14](https://github.com/Orion-Digital-Solutions/.github/pull/14). |
+| 2 | Done: [#16](https://github.com/Orion-Digital-Solutions/.github/pull/16) ([#15](https://github.com/Orion-Digital-Solutions/.github/pull/15) was closed and replaced by #16). Item 5.1 (relative child references) was done early, in this phase. |
+| 3 | Done: [#18](https://github.com/Orion-Digital-Solutions/.github/pull/18). Hadolint is held at v3.1.0 (Hadolint 2.12) for `v1`; see 3.6. |
+| 4 | Done: [#20](https://github.com/Orion-Digital-Solutions/.github/pull/20). The sandbox caller (4.3) is [`Orion-Digital-Solutions/ci-sandbox`](https://github.com/Orion-Digital-Solutions/ci-sandbox). |
+| 5 | 5.4 and 5.5 are prepared in one pull request (templates and README at `@v1`, [MIGRATION.md](MIGRATION.md)), which also carries 6.7 and 6.10. It is held until an org owner creates the `v1.0.0` and `v1` tags (5.3), because templates pointing at a missing tag would break new callers. |
+| 6 | In progress on a separate branch. It is **not merged to `main` until callers are on `@v1`**: `v2` changes status-check names, and `main` is what the 18 callers run today. |
+
 ## Release plan in one view
 
 | Release | Contains | Breaking for callers? |
@@ -133,10 +144,10 @@ Already current, no action: `actions/upload-artifact@v7`, `github/codeql-action@
 | 6.4 | Lint all Dockerfiles in one job instead of one job each, installing Hadolint once and pulling Checkov once. | M | 6.1 | | Docker lint bills one minute regardless of Dockerfile count in the sandbox. |
 | 6.5 | SonarCloud change detection: on pull requests scan only projects whose `base-dir` has changed files; on the main branch scan all. | M | 6.3 | | A PR touching one project starts one Sonar leg. |
 | 6.6 | Gate by event. Schedule: full-history secret scan, licence check, and image CVE scan when image build is on; skip Sonar and Docker lint. Release: SBOM only. | S | | | Scheduled and release runs start only those jobs. |
-| 6.7 | Fix the templates' triggers: `push` only on the main branch, `pull_request` for everything else, plus a `concurrency` group with cancel-in-progress. Today a develop-to-main PR runs twice per commit ([ci.yml:17-26](workflow-templates/ci.yml#L17-L26)). | S | | | One run per commit on a PR. |
+| 6.7 | Fix the templates' triggers: `push` only on the main branch, `pull_request` for everything else, plus a `concurrency` group with cancel-in-progress. Today a develop-to-main PR runs twice per commit ([ci.yml:17-26](workflow-templates/ci.yml#L17-L26)). **Moved into the Phase 5 pull request:** templates only, so it is not a `v2` change. | S | | | One run per commit on a PR. |
 | 6.8 | Skip heavy jobs for documentation-only changes, decided inside the fast-checks job so required checks still report. | S | 6.3 | | A README-only PR completes with the gate green and no Sonar or Docker jobs. |
 | 6.9 | Image-build path (opt-in): use the buildx GitHub cache; run scan, SBOM and Dive in the build job instead of passing a tarball between four jobs; scan once with Trivy and convert formats. | L | 6.1 | | One job; one Trivy scan per image. |
-| 6.10 | Change the stale template from daily to weekly ([stale.yml:6](workflow-templates/stale.yml#L6)). | S | | | Cron is weekly. |
+| 6.10 | Change the stale template from daily to weekly ([stale.yml:6](workflow-templates/stale.yml#L6)). **Moved into the Phase 5 pull request.** | S | | | Cron is weekly. |
 | 6.11 | Optional: add a `light-runner` input so the fast-checks and gate jobs can use `ubuntu-slim`. *Its price and limits (no Docker, 15-minute cap) come from third-party pricing pages; confirm against GitHub's docs first.* | S | 6.2, 6.3 | | Input exists and is documented, or the item is closed as not worthwhile. |
 | 6.12 | Tag `v2.0.0` and `v2`. Publish a migration note that lists the removed check names and the single `CI gate` check to require instead. State how long `v1` will receive fixes. | S | 6.2 to 6.10 | | Tags and note published. |
 | 6.13 | Measure. Re-run the sandbox and one real caller on `v2` and record billed minutes against the baseline. | S | 6.12 | | Numbers recorded in this file. |

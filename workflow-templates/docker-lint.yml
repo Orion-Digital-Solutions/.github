@@ -44,9 +44,13 @@ name: Docker Image Scan (full build + scan)
 # 5. Commit this file — the shared pipeline handles everything else.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Triggers: `push` runs only on the default branch, and `pull_request` covers
+# every other branch, so a commit on a branch with an open PR starts one run,
+# not two. Add a long-lived branch (e.g. develop) to `push.branches` only if it
+# needs CI without an open PR.
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - "**/Dockerfile"
       - "**/Dockerfile.*"
@@ -55,7 +59,6 @@ on:
       - "**/.dockerignore"
       - ".dockerignore"
   pull_request:
-    branches: [main]
     paths:
       - "**/Dockerfile"
       - "**/Dockerfile.*"
@@ -68,6 +71,12 @@ on:
     - cron: "0 7 * * 1"
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
+
+# A new commit on a PR cancels that PR's run still in progress. Other events
+# get their own group (the run id), so main-branch runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Token permissions: the maximum the shared workflow requests. GitHub
 # validates these at start-up even for jobs that are skipped, and each shared
@@ -82,7 +91,7 @@ permissions:
 jobs:
   docker-lint:
     name: Docker Best Practices
-    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v1
     with:
       # ── Image build ────────────────────────────────────────────────────────
       # Required for this template: the reusable workflow defaults build-image to

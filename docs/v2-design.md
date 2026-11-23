@@ -133,7 +133,7 @@ The roadmap target of 8 for a full run is not reachable by job merging alone: So
 3. `permissions:` block: unchanged.
 4. Inputs: none removed. New, optional: `docs-only-paths`, and `"paths"` in `sonar-projects` elements. `GITLEAKS_LICENSE` becomes a no-op (pending confirmation).
 5. Self-hosted runners passed through `runner:` must be on runner 2.336.0 or newer.
-6. Behaviour changes for the migration note: Hadolint 2.15 rules (ROADMAP 3.6); Docker lint SARIF moves from per-target categories (`hadolint-dockerfile-<id>`) to one per tool, so public repos see the old categories' alerts go stale; PRs scan only changed Sonar projects.
+6. Behaviour changes for the migration note: PRs scan only changed Sonar projects; docs-only changes skip Sonar, Dockerfile lint and image jobs; schedule runs only the secret, licence and image CVE scans; release runs only the SBOM jobs. As built, Hadolint stays at 2.12 and Docker lint SARIF keeps per-target categories (`hadolint-dockerfile-<id>`), so neither changes for callers (see section 14).
 
 ## 11. Proof of concept and how to run it
 

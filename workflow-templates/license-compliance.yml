@@ -20,7 +20,7 @@ permissions:
 jobs:
   license-check:
     name: License Compliance
-    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@v1
     # Uncomment `with:` together with any option below. An empty `with:` is invalid.
     # with:
       # Default forbidden list covers copyleft licenses (GPL, AGPL, LGPL).

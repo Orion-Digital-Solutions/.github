@@ -1,10 +1,19 @@
 name: Python CI
 
+# Triggers: `push` runs only on the default branch, and `pull_request` covers
+# every other branch, so a commit on a branch with an open PR starts one run,
+# not two. Add a long-lived branch (e.g. develop) to `push.branches` only if it
+# needs CI without an open PR.
 on:
   push:
-    branches: [main, develop]
-  pull_request:
     branches: [main]
+  pull_request:
+
+# A new commit on a PR cancels that PR's run still in progress. Other events
+# get their own group (the run id), so main-branch runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Read-only token: this workflow only checks out, tests, and uploads an artifact.
 permissions:

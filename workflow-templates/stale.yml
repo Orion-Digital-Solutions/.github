@@ -2,8 +2,12 @@ name: Stale Issue & PR Management
 
 on:
   schedule:
-    # Runs daily at 01:00 UTC — off-peak to minimise rate-limit pressure
-    - cron: "0 1 * * *"
+    # Weekly, Monday 01:00 UTC (off-peak, to minimise rate-limit pressure).
+    # Was daily: every run bills at least one full minute, so daily cost ~30
+    # billed minutes a month per repository for a job that only needs to
+    # notice inactivity measured in weeks. The 60/30-day stale windows below
+    # make a weekly check enough; a mark or close can land up to 6 days later.
+    - cron: "0 1 * * 1"
   workflow_dispatch:  # Allow manual trigger for initial clean-up
 
 # Token permissions: the maximum the shared workflow requests. GitHub
@@ -15,7 +19,7 @@ permissions:
 jobs:
   stale:
     name: Stale Issue & PR Management
-    uses: orion-digital-solutions/.github/.github/workflows/stale.yml@main
+    uses: orion-digital-solutions/.github/.github/workflows/stale.yml@v1
     with:
       # ── Issues ─────────────────────────────────────────────────────────────
       # Mark stale after 60 days of inactivity; close 14 days after that.

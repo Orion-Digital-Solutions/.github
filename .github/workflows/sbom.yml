@@ -7,7 +7,7 @@ name: SBOM Generation (Reusable)
 #     contents: write
 #     id-token: write
 #     attestations: write
-#   uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@main
+#   uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@v1
 #
 # ── What is an SBOM? ─────────────────────────────────────────────────────────
 # An SBOM is a machine-readable inventory of every library, framework, and
