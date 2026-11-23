@@ -201,3 +201,16 @@ Call it from the sandbox with `uses: Orion-Digital-Solutions/.github/.github/wor
 5. Merged Docker lint with the sandbox's two Dockerfiles (and a third added for the test): does it stay under 60 s?
 6. Sonar change detection cannot run in the sandbox (no Sonar project). Test on a real monorepo caller branch, per CONTRIBUTING.
 7. Does any caller pass a self-hosted label in `runner`? If so, check its runner version.
+
+## 14. Implementation notes (`ci.yml`, 6.2 to 6.9)
+
+Where the implementation differs from, or adds to, sections 5 to 8:
+
+- **Plan stays inline** as the `Plan` step of `fast-checks`, not a `plan` composite with `plan.sh` (section 4). The logic is the v1 normalisation plus change detection, docs-only and event gating; extracting it later only moves the script.
+- **No `ci-fast-checks` artifact.** The composites upload `gitleaks-report` and `license-report` under their v1 names (`artifact-suffix` left empty) and the gate reads those.
+- **Docs-only patterns** are trimmed per line; matching is the `docker-exclude` style `case` match. Push to a tag, `workflow_dispatch` and other events run in full.
+- **`image` + `image-publish`.** `image` is the read-only matrix leg (`contents: read`, `security-events: write`, `actions: read`); on schedule it runs with `sbom-enable` and `dive-enable` off (CVE scan only), on release with the build cache off. `image-publish` ("Publish container SBOMs", release only, `contents: write`, no checkout) downloads `docker-sbom-*` and runs `gh release upload`, also after a leg failed on a finding, as v1 did. No attestation: the v1 orchestrator never passed `sbom-attest`, so no `id-token` scope is requested.
+- **Gate verdict** is the last step, after the `continue-on-error` report steps, and reads only `needs.*.result` plus two `fast-checks` outputs, `secret-result` and `licence-result`. When `fast-checks` succeeded but either is not `clean`, the gate fails: `install-command` runs caller code that could write `$GITHUB_ENV` (for example `BASH_ENV`) to neutralise the job's own "Fail on secret or licence findings" step, but it cannot change an earlier step's outputs.
+- **New `fast-checks` outputs** for the report: `sonar-total` (configured projects), `docker-targets`/`docker-count` (all resolved Dockerfiles), `plan-outcome`, `secret-result`, `licence-result`. `sonar-projects`/`sonar-count` are the filtered list.
+- **Docker lint on PRs** lints every target (no Dockerfile change detection yet).
+- **Check names after v2**: `Orion CI / Fast checks`, `Orion CI / SonarCloud (<key>) / SonarCloud Scan`, `Orion CI / Dockerfile lint`, `Orion CI / Image (<id>)`, `Orion CI / Publish container SBOMs`, `Orion CI / SBOM Generation / Generate SBOM`, `Orion CI / CI gate`. Require only the last.

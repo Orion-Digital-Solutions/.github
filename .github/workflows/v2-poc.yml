@@ -15,11 +15,6 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Show job.workflow_* (informational)
-        env:
-          WF_REPO: ${{ job.workflow_repository }}
-          WF_SHA: ${{ job.workflow_sha }}
-        run: echo "defined in ${WF_REPO}@${WF_SHA}"
       - uses: $/.github/actions/v2-poc
         with:
           plant-decoy: "true"

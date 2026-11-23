@@ -1,0 +1,436 @@
+name: Docker image build and scan
+description: >-
+  Opt-in image path for ONE Dockerfile, in one job (ROADMAP 6.9, see
+  docs/v2-design.md): buildx build with the GitHub Actions cache, loaded into
+  the local Docker daemon, OCI label injection and verification, one Trivy
+  scan converted to table, JSON and SARIF, optional Grype, Syft SBOMs (SPDX +
+  CycloneDX) uploaded as workflow artifacts, and Dive. Nothing is passed
+  between jobs as a tarball. Publishing the SBOM (release asset, attestation)
+  is NOT done here: it needs write scopes, so it belongs in a separate job
+  that downloads the SBOM artifacts (see workflows/docker-lint.yml `publish`). Does not check out code: the
+  calling job must check out the repository (persist-credentials false).
+  Records every check and fails once, in its last step, only when
+  `fail-on-findings` is true.
+
+# ── Permissions the calling job needs ─────────────────────────────────────────
+#   contents: read                 checkout
+#   security-events: write,        SARIF upload (upload-sarif)
+#   actions: read
+# Nothing else (ROADMAP 1.3: the job that builds a PR's Dockerfile stays
+# read-only). The Dockerfile's RUN steps execute inside BuildKit; no token is passed to
+# the build (the npm token is a BuildKit secret, mounted only where the
+# Dockerfile asks for `--mount=type=secret,id=npm_token`). The built image is
+# only read (inspect, Trivy, Grype, Syft, Dive), never run.
+#
+# ── Cache ─────────────────────────────────────────────────────────────────────
+# `gha-cache: true` uses the GitHub Actions cache (type=gha, mode=max) scoped
+# per target: docker-image[-<target-id>]. GitHub scopes cache entries by branch:
+# a run reads its own branch's entries and the default branch's, never a
+# pull request's. Callers should pass false where the result is published
+# (release events), so a published SBOM always comes from a clean build.
+#
+# ── Artifacts and SARIF (same names and schema as v1) ─────────────────────────
+#   docker-vuln-report[-<id>]       docker-vuln-report.json: {meta: {image, sha,
+#                                   severity_filter, vulnerability_count},
+#                                   results: <Trivy Results at trivy-severity>}
+#   <sbom-artifact-name>[-<id>]-spdx.json       holds <sbom-artifact-name>[-<id>].spdx.json
+#   <sbom-artifact-name>[-<id>]-cyclonedx.json  holds <sbom-artifact-name>[-<id>].cyclonedx.json
+#   The artifact and file names are also outputs, for the publishing job.
+#   SARIF categories: trivy-container[-<id>], grype-container[-<id>]
+#
+# ── Verdict ───────────────────────────────────────────────────────────────────
+# `result`: clean | findings | error. findings = labels, trivy, grype or dive
+# failed their policy; error = a step could not run (build, Trivy install or
+# scan, SBOM). `failed-checks`: JSON array of those check names.
+# ─────────────────────────────────────────────────────────────────────────────
+
+inputs:
+  dockerfile:
+    description: "Path to the Dockerfile, relative to the repository root"
+    required: false
+    default: "Dockerfile"
+  context:
+    description: "Docker build context path"
+    required: false
+    default: "."
+  image-name:
+    description: "Name and tag for the locally loaded image (e.g. myapp:ci)"
+    required: false
+    default: "orion-docker-check:ci"
+  target-id:
+    description: "Per-target slug appended to artifact names, SARIF categories and the cache scope. Blank keeps the v1 single-Dockerfile names."
+    required: false
+    default: ""
+  build-args:
+    description: "Newline-separated build arguments (KEY=VALUE)"
+    required: false
+    default: ""
+  npm-token:
+    description: "Read-only npm registry token, exposed to the build only as the BuildKit secret `npm_token` (never a build-arg). Composite actions cannot read secrets: pass secrets.AZURE_NPM_TOKEN here."
+    required: false
+    default: ""
+  gha-cache:
+    description: "'true' (default): use the GitHub Actions build cache, scoped per target-id."
+    required: false
+    default: "true"
+
+  enforce-labels:
+    description: "'true' (default): fail when a label in required-labels is missing from the built image"
+    required: false
+    default: "true"
+  required-labels:
+    description: "Comma-separated OCI label keys that must be present in the built image"
+    required: false
+    default: "org.opencontainers.image.source,org.opencontainers.image.revision,org.opencontainers.image.created"
+
+  trivy-severity:
+    description: "Comma-separated severities that fail the scan (also the filter of the JSON report)"
+    required: false
+    default: "CRITICAL,HIGH"
+  trivy-exit-code:
+    description: "1 (default): findings at trivy-severity fail the check; 0: report only"
+    required: false
+    default: "1"
+  trivy-ignore-unfixed:
+    description: "'true': skip CVEs without a fix (applies to Trivy and, as only-fixed, to Grype)"
+    required: false
+    default: "false"
+  grype-enable:
+    description: "'true': also scan with Grype (cutoff = lowest level in trivy-severity)"
+    required: false
+    default: "false"
+
+  sbom-enable:
+    description: "'true' (default): generate SPDX and CycloneDX SBOMs of the image with Syft"
+    required: false
+    default: "true"
+  sbom-artifact-name:
+    description: "Prefix of the SBOM artifact names"
+    required: false
+    default: "docker-sbom"
+
+  dive-enable:
+    description: "'true' (default): run the Dive efficiency check"
+    required: false
+    default: "true"
+  dive-min-efficiency:
+    description: "Minimum image efficiency (0.0 to 1.0)"
+    required: false
+    default: "0.9"
+
+  upload-sarif:
+    description: "'true' (default): upload Trivy/Grype SARIF when code scanning is available (probed first)"
+    required: false
+    default: "true"
+  artifact-retention-days:
+    description: "Retention in days of the vulnerability report artifact"
+    required: false
+    default: "7"
+  fail-on-findings:
+    description: "'true' (default): the last step fails when `result` is not clean. 'false': never fail; read the outputs."
+    required: false
+    default: "true"
+  github-token:
+    description: "Token for the code-scanning probe and the SARIF upload"
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: "clean | findings | error"
+    value: ${{ steps.verdict.outputs.result }}
+  failed-checks:
+    description: "JSON array of the checks that failed (build, labels, trivy, grype, sbom-spdx, sbom-cyclonedx, dive, ...)"
+    value: ${{ steps.verdict.outputs.failed-checks }}
+  image-name:
+    description: "Name and tag of the locally loaded image"
+    value: ${{ inputs.image-name }}
+  image-id:
+    description: "Image ID (sha256:...) of the built image, as docker inspect reports it"
+    value: ${{ steps.ready.outputs.image-id }}
+  vulnerability-count:
+    description: "Number of vulnerabilities at trivy-severity found by Trivy"
+    value: ${{ steps.trivy.outputs.vuln-count }}
+  sbom-spdx-artifact:
+    description: "Name of the SPDX SBOM artifact; empty when it was not produced"
+    value: ${{ steps.sbom.outputs.spdx-artifact }}
+  sbom-spdx-file:
+    description: "File name of the SPDX SBOM inside its artifact; empty when it was not produced"
+    value: ${{ steps.sbom.outputs.spdx-file }}
+  sbom-cyclonedx-artifact:
+    description: "Name of the CycloneDX SBOM artifact; empty when it was not produced"
+    value: ${{ steps.sbom.outputs.cyclonedx-artifact }}
+  sbom-cyclonedx-file:
+    description: "File name of the CycloneDX SBOM inside its artifact; empty when it was not produced"
+    value: ${{ steps.sbom.outputs.cyclonedx-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare build
+      id: prepare
+      continue-on-error: true
+      shell: bash
+      env:
+        DOCKERFILE: ${{ inputs.dockerfile }}
+        CONTEXT: ${{ inputs.context }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        TARGET_ID: ${{ inputs.target-id }}
+        REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        SHA: ${{ github.sha }}
+        REF_NAME: ${{ github.ref_name }}
+      run: bash "${GITHUB_ACTION_PATH}/prepare.sh"
+
+    - name: Set up Docker Buildx
+      id: buildx
+      if: steps.prepare.outcome == 'success'
+      continue-on-error: true
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    # Loaded into the local daemon (no push). No provenance/SBOM attestations:
+    # the docker exporter cannot store them, and the SBOM comes from Syft.
+    # Build record artifact disabled: it would add one artifact per target.
+    - name: Build image
+      id: build
+      if: steps.buildx.outcome == 'success'
+      continue-on-error: true
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      env:
+        NPM_TOKEN: ${{ inputs.npm-token }}
+        DOCKER_BUILD_RECORD_UPLOAD: "false"
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.dockerfile }}
+        tags: ${{ inputs.image-name }}
+        load: true
+        push: false
+        provenance: false
+        sbom: false
+        labels: ${{ steps.prepare.outputs.labels }}
+        build-args: ${{ inputs.build-args }}
+        secret-envs: ${{ inputs.npm-token != '' && 'npm_token=NPM_TOKEN' || '' }}
+        cache-from: ${{ inputs.gha-cache == 'true' && format('type=gha,scope={0}', steps.prepare.outputs.cache-scope) || '' }}
+        cache-to: ${{ inputs.gha-cache == 'true' && format('type=gha,mode=max,ignore-error=true,scope={0}', steps.prepare.outputs.cache-scope) || '' }}
+
+    - name: Verify OCI labels
+      id: labels
+      if: steps.build.outcome == 'success' && inputs.enforce-labels == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image-name }}
+        REQUIRED_LABELS: ${{ inputs.required-labels }}
+      run: bash "${GITHUB_ACTION_PATH}/verify-labels.sh"
+
+    # As in v1, nothing below runs on an image that failed to build or that
+    # lacks a required label.
+    - name: Image ready
+      id: ready
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        BUILD_OUTCOME: ${{ steps.build.outcome }}
+        LABELS_OUTCOME: ${{ steps.labels.outcome }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+      run: |
+        set -euo pipefail
+        if [ "${BUILD_OUTCOME}" = success ] && [ "${LABELS_OUTCOME}" != failure ]; then
+          IMAGE_ID=$(docker inspect --format '{{.Id}}' "${IMAGE_NAME}")
+          echo "Image ${IMAGE_NAME}: ${IMAGE_ID}"
+          { echo "ok=true"; echo "image-id=${IMAGE_ID}"; } >> "${GITHUB_OUTPUT}"
+        else
+          echo "ok=false" >> "${GITHUB_OUTPUT}"
+        fi
+
+    - name: Check code scanning availability
+      id: sarif-preflight
+      if: steps.ready.outputs.ok == 'true' && inputs.upload-sarif == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        API_URL: ${{ github.api_url }}
+        REPO: ${{ github.repository }}
+      run: bash "${GITHUB_ACTION_PATH}/sarif-preflight.sh"
+
+    # ── Trivy: one scan, three formats ────────────────────────────────────────
+    - name: Install Trivy v0.70.0
+      id: trivy-install
+      if: steps.ready.outputs.ok == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        WORK_DIR: ${{ steps.prepare.outputs.work-dir }}
+      run: bash "${GITHUB_ACTION_PATH}/install-trivy.sh"
+
+    - name: Trivy — vulnerability scan
+      id: trivy
+      if: steps.trivy-install.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        TRIVY_BIN: ${{ steps.trivy-install.outputs.path }}
+        WORK_DIR: ${{ steps.prepare.outputs.work-dir }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SEVERITY: ${{ inputs.trivy-severity }}
+        EXIT_CODE: ${{ inputs.trivy-exit-code }}
+        IGNORE_UNFIXED: ${{ inputs.trivy-ignore-unfixed }}
+        SHA: ${{ github.sha }}
+      run: bash "${GITHUB_ACTION_PATH}/trivy-scan.sh"
+
+    # Supplementary: must never fail the job.
+    - name: Upload Trivy SARIF
+      if: ${{ !cancelled() && steps.trivy.outputs.sarif != '' && steps.sarif-preflight.outputs.available == 'true' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ steps.trivy.outputs.sarif }}
+        category: trivy-container${{ steps.prepare.outputs.suffix }}
+        token: ${{ inputs.github-token }}
+
+    - name: Upload vulnerability report artifact
+      if: ${{ !cancelled() && steps.trivy.outputs.report-dir != '' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: docker-vuln-report${{ steps.prepare.outputs.suffix }}
+        path: ${{ steps.trivy.outputs.report-dir }}/docker-vuln-report.json
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn
+
+    # ── Grype (optional) ──────────────────────────────────────────────────────
+    # Grype takes one minimum severity: use the LOWEST level in trivy-severity
+    # so both scanners gate on the same range (nothing recognised = high).
+    - name: Resolve Grype severity cutoff
+      id: grype-cutoff
+      if: steps.ready.outputs.ok == 'true' && inputs.grype-enable == 'true'
+      shell: bash
+      env:
+        SEVERITY: ${{ inputs.trivy-severity }}
+      run: |
+        set -euo pipefail
+        LIST=",$(printf '%s' "${SEVERITY}" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]'),"
+        CUTOFF=high
+        for pair in UNKNOWN:negligible LOW:low MEDIUM:medium HIGH:high CRITICAL:critical; do
+          case "${LIST}" in
+            *",${pair%%:*},"*) CUTOFF="${pair#*:}"; break ;;
+          esac
+        done
+        echo "Grype severity cutoff: ${CUTOFF} (from trivy-severity '${SEVERITY}')"
+        echo "cutoff=${CUTOFF}" >> "${GITHUB_OUTPUT}"
+
+    - name: Grype — vulnerability scan
+      id: grype
+      if: steps.grype-cutoff.outcome == 'success'
+      continue-on-error: true
+      uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+      with:
+        image: ${{ inputs.image-name }}
+        fail-build: true
+        severity-cutoff: ${{ steps.grype-cutoff.outputs.cutoff }}
+        # Same "fixed only" rule as Trivy, so both scanners gate on one policy.
+        only-fixed: ${{ inputs.trivy-ignore-unfixed }}
+        output-format: sarif
+
+    - name: Upload Grype SARIF
+      if: ${{ !cancelled() && steps.grype.outcome != 'skipped' && steps.grype.outputs.sarif != '' && steps.sarif-preflight.outputs.available == 'true' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ steps.grype.outputs.sarif }}
+        category: grype-container${{ steps.prepare.outputs.suffix }}
+        token: ${{ inputs.github-token }}
+
+    # ── Container SBOM (Syft) ─────────────────────────────────────────────────
+    # upload-release-assets is forced off (sbom-action defaults it to on for
+    # release events): this job is read-only; a separate job publishes.
+    - name: Generate container SBOM — SPDX JSON
+      id: sbom-spdx
+      if: steps.ready.outputs.ok == 'true' && inputs.sbom-enable == 'true'
+      continue-on-error: true
+      uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      with:
+        image: ${{ inputs.image-name }}
+        format: spdx-json
+        output-file: ${{ steps.prepare.outputs.work-dir }}/${{ inputs.sbom-artifact-name }}${{ steps.prepare.outputs.suffix }}.spdx.json
+        upload-artifact: true
+        artifact-name: ${{ inputs.sbom-artifact-name }}${{ steps.prepare.outputs.suffix }}-spdx.json
+        upload-release-assets: false
+
+    - name: Generate container SBOM — CycloneDX JSON
+      id: sbom-cdx
+      if: ${{ !cancelled() && steps.ready.outputs.ok == 'true' && inputs.sbom-enable == 'true' }}
+      continue-on-error: true
+      uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+      with:
+        image: ${{ inputs.image-name }}
+        format: cyclonedx-json
+        output-file: ${{ steps.prepare.outputs.work-dir }}/${{ inputs.sbom-artifact-name }}${{ steps.prepare.outputs.suffix }}.cyclonedx.json
+        upload-artifact: true
+        artifact-name: ${{ inputs.sbom-artifact-name }}${{ steps.prepare.outputs.suffix }}-cyclonedx.json
+        upload-release-assets: false
+
+    # Exposes the artifact and file names of each SBOM that was produced, for
+    # the job that publishes them.
+    - name: Container SBOM summary
+      id: sbom
+      if: ${{ !cancelled() && (steps.sbom-spdx.outcome == 'success' || steps.sbom-cdx.outcome == 'success') }}
+      shell: bash
+      env:
+        BASE: ${{ inputs.sbom-artifact-name }}${{ steps.prepare.outputs.suffix }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        SPDX_OUTCOME: ${{ steps.sbom-spdx.outcome }}
+        CDX_OUTCOME: ${{ steps.sbom-cdx.outcome }}
+      run: |
+        set -euo pipefail
+        {
+          if [ "${SPDX_OUTCOME}" = success ]; then
+            echo "spdx-artifact=${BASE}-spdx.json"
+            echo "spdx-file=${BASE}.spdx.json"
+          fi
+          if [ "${CDX_OUTCOME}" = success ]; then
+            echo "cyclonedx-artifact=${BASE}-cyclonedx.json"
+            echo "cyclonedx-file=${BASE}.cyclonedx.json"
+          fi
+        } >> "${GITHUB_OUTPUT}"
+        {
+          echo "### Container Image SBOM"
+          echo ""
+          echo "**Image:** \`${IMAGE_NAME}\`"
+          echo ""
+          echo "| Format | Artifact | Status |"
+          echo "|--------|----------|--------|"
+          echo "| SPDX JSON | \`${BASE}-spdx.json\` | ${SPDX_OUTCOME} |"
+          echo "| CycloneDX JSON | \`${BASE}-cyclonedx.json\` | ${CDX_OUTCOME} |"
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+    # ── Dive ──────────────────────────────────────────────────────────────────
+    - name: Dive — image efficiency check
+      id: dive
+      if: ${{ !cancelled() && steps.ready.outputs.ok == 'true' && inputs.dive-enable == 'true' }}
+      continue-on-error: true
+      shell: bash
+      env:
+        WORK_DIR: ${{ steps.prepare.outputs.work-dir }}
+        IMAGE_NAME: ${{ inputs.image-name }}
+        MIN_EFFICIENCY: ${{ inputs.dive-min-efficiency }}
+      run: bash "${GITHUB_ACTION_PATH}/dive.sh"
+
+    # ── Verdict ───────────────────────────────────────────────────────────────
+    - name: Verdict
+      id: verdict
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        PREPARE: ${{ steps.prepare.outcome }}
+        BUILDX: ${{ steps.buildx.outcome }}
+        BUILD: ${{ steps.build.outcome }}
+        LABELS: ${{ steps.labels.outcome }}
+        READY: ${{ steps.ready.outputs.ok }}
+        TRIVY_INSTALL: ${{ steps.trivy-install.outcome }}
+        TRIVY_RESULT: ${{ steps.trivy.outputs.result }}
+        GRYPE: ${{ steps.grype.outcome }}
+        SBOM_SPDX: ${{ steps.sbom-spdx.outcome }}
+        SBOM_CDX: ${{ steps.sbom-cdx.outcome }}
+        DIVE: ${{ steps.dive.outcome }}
+        SEVERITY: ${{ inputs.trivy-severity }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+      run: bash "${GITHUB_ACTION_PATH}/verdict.sh"

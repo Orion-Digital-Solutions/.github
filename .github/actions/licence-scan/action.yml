@@ -1,0 +1,365 @@
+name: Trivy licence scan
+description: >-
+  OSS licence compliance for Orion repositories with Trivy (ROADMAP 6.3, see
+  docs/v2-design.md). Optionally installs production dependencies, scans for
+  forbidden licences, uploads a JSON report artifact and, where code scanning
+  is available, a SARIF. Does not check out code: the calling job must check
+  out the repository (persist-credentials false). Reports its verdict in the
+  `result` output and fails only in its last step, and only when
+  `fail-on-findings` is true, so a job can run several scans and record every
+  result before failing. `install-command` runs caller code, so run this
+  action after any step whose outcome must not be tampered with.
+
+# ── Where Trivy reads licences from (fs scan) ────────────────────────────────
+# Lock files alone only carry licences for npm (package-lock.json). For the
+# others, Trivy reads licences from installed packages, so set install-command
+# to something that leaves them where Trivy looks:
+# • pip (requirements.txt): the site-packages of $VIRTUAL_ENV, else of the
+#   `python3` on PATH. The runner's system Python has no site-packages dir, so
+#   install into a venv and export VIRTUAL_ENV through $GITHUB_ENV:
+#     python3 -m venv "$RUNNER_TEMP/venv" && "$RUNNER_TEMP/venv/bin/pip" install -r requirements.txt && echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+#   Pipenv, Poetry and uv lock files get no licence data from Trivy at all.
+# • pnpm: node_modules next to pnpm-lock.yaml, inside scan-path:
+#     corepack enable && pnpm install --frozen-lockfile --prod --ignore-scripts
+# • Yarn Classic: node_modules next to yarn.lock, inside scan-path:
+#     yarn install --frozen-lockfile --production --ignore-scripts
+# • Yarn 2+: .yarn/cache (or .yarn/unplugged) next to yarn.lock; Yarn 4 uses a
+#   global cache by default, so turn it off:
+#     corepack enable && YARN_ENABLE_GLOBAL_CACHE=false yarn install --immutable
+# • Go: vendor/ next to go.mod, or the module cache at $GOPATH/pkg/mod
+#   (default ~/go/pkg/mod; a custom GOMODCACHE is not read):
+#     go mod download
+# The command runs from the repository root; prefix `cd <dir> &&` for a
+# project in a subdirectory.
+#
+# ── Artifacts ────────────────────────────────────────────────────────────────
+# Uploads `license-report<artifact-suffix>` (JSON) for the CI orchestrator
+# report. Also uploads SARIF to the GitHub Security tab (Code Scanning) when
+# upload-sarif is true and code scanning is available; the calling job then
+# needs security-events: write and actions: read.
+#
+# ── Verdict ──────────────────────────────────────────────────────────────────
+# `result` output: clean | findings | error. findings = the table scan failed
+# (Trivy exit 1: a licence at or above `severity` was found; as in v1, a Trivy
+# crash in that scan is also reported this way). error = the install command
+# or config step failed (no scan ran), or the report could not be produced or
+# uploaded after a clean scan. SARIF steps never change the verdict.
+# ─────────────────────────────────────────────────────────────────────────────
+
+inputs:
+  forbidden-licenses:
+    description: "Comma-separated SPDX license IDs to treat as violations. Leave blank for the default list (DEFAULT_FORBIDDEN_LICENSES in this action)."
+    required: false
+    default: ""
+
+  allowed-licenses:
+    description: "Comma-separated SPDX license IDs that are explicitly permitted"
+    required: false
+    default: "MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0,CC0-1.0,Unlicense,Python-2.0,PSF-2.0"
+
+  scan-path:
+    description: "Directory to scan for dependency manifests"
+    required: false
+    default: "."
+
+  severity:
+    description: "Minimum severity to report: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+    required: false
+    default: "HIGH,CRITICAL"
+
+  # See "Where Trivy reads licences from" at the top for what the command
+  # must leave behind for each ecosystem.
+  install-command:
+    description: "Command that installs production dependencies before the scan, so Trivy can read licences that lock files don't carry (pip, pnpm, Yarn, Go). Runs from the repository root. Leave blank to scan lock files only."
+    required: false
+    default: ""
+
+  upload-sarif:
+    description: "Upload SARIF results to GitHub Security tab. 'true' or 'false'."
+    required: false
+    default: "true"
+
+  token:
+    description: "Token for the code-scanning availability check (composite actions cannot read secrets.GITHUB_TOKEN)."
+    required: false
+    default: ${{ github.token }}
+
+  artifact-suffix:
+    description: "Appended verbatim to the artifact name `license-report` (e.g. '-fast-checks'). Empty keeps the v1 name."
+    required: false
+    default: ""
+
+  fail-on-findings:
+    description: "'true' (default): the last step fails when `result` is not clean (findings or error). 'false': never fail; read the `result` output instead."
+    required: false
+    default: "true"
+
+outputs:
+  result:
+    description: "clean | findings | error"
+    value: ${{ steps.verdict.outputs.result }}
+  findings-count:
+    description: "Number of packages whose licence is in the forbidden category (meta.violation_count of the report). Empty when the report could not be read."
+    value: ${{ steps.verdict.outputs.findings-count }}
+  report-path:
+    description: "Path of the JSON report (meta + results), relative to the workspace."
+    value: ${{ steps.verdict.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    # ── Optional: install dependencies so Trivy can read their licences ──────
+    # Without this, pip/pnpm/Yarn/Go packages are listed with no licence
+    # and cannot match the forbidden list. A failing command means no scan
+    # runs (result: error).
+    - name: Install production dependencies
+      id: install
+      continue-on-error: true
+      shell: bash
+      env:
+        INSTALL_COMMAND: ${{ inputs.install-command }}
+      run: |
+        if [ -z "${INSTALL_COMMAND//[[:space:]]/}" ]; then
+          echo "::warning::No install-command set: licences for pip, pnpm, Yarn and Go dependencies cannot be read from lock files alone, so the licence gate may pass without checking them. Set install-command to install production dependencies before the scan."
+          exit 0
+        fi
+        bash -c "${INSTALL_COMMAND}"
+
+    # ── Build Trivy config from inputs ───────────────────────────────────────
+    # Lists are split on commas (or newlines), trimmed, and blank entries
+    # dropped. A blank forbidden list falls back to the default; a blank
+    # allowed list writes no `ignored:` key. jq writes the config as JSON,
+    # which is valid YAML and quotes every entry safely.
+    - name: Prepare Trivy license config
+      id: license-config
+      if: steps.install.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        FORBIDDEN: ${{ inputs.forbidden-licenses }}
+        ALLOWED:   ${{ inputs.allowed-licenses }}
+        # Single source of the default forbidden list, used when the
+        # forbidden-licenses input is blank.
+        DEFAULT_FORBIDDEN_LICENSES: "GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0,LGPL-2.0,LGPL-2.1,LGPL-3.0,EUPL-1.1,EUPL-1.2,CCDL-1.0,OSL-3.0"
+      run: |
+        jq -n \
+          --arg forbidden "$FORBIDDEN" \
+          --arg default "$DEFAULT_FORBIDDEN_LICENSES" \
+          --arg allowed "$ALLOWED" \
+          'def list: [splits("[,\n]") | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "") | select(length > 0)];
+           ($forbidden | list) as $f
+           | ($allowed | list) as $a
+           | {license: (
+               {forbidden: (if ($f | length) > 0 then $f else ($default | list) end)}
+               + (if ($a | length) > 0 then {ignored: $a} else {} end)
+             )}' > trivy-license.yaml
+
+        EFFECTIVE=$(jq -r '.license.forbidden | join(",")' trivy-license.yaml)
+        echo "Forbidden licences: ${EFFECTIVE}"
+        echo "forbidden=${EFFECTIVE}" >> "$GITHUB_OUTPUT"
+        echo "config_path=trivy-license.yaml" >> "$GITHUB_OUTPUT"
+
+    # ── Scan 1: Table (job log summary) — its outcome is the verdict ─────────
+    - name: Trivy license scan — table (fail on violations)
+      id: trivy-table
+      if: steps.license-config.outcome == 'success'
+      continue-on-error: true
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type:    fs
+        scan-ref:     ${{ inputs.scan-path }}
+        scanners:     license
+        severity:     ${{ inputs.severity }}
+        trivy-config: ${{ steps.license-config.outputs.config_path }}
+        format:       table
+        exit-code:    "1"
+
+    # ── Scan 2: JSON (artifact for report) ───────────────────────────────────
+    - name: Trivy license scan — JSON (report artifact)
+      id: trivy-json
+      if: always()
+      continue-on-error: true
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type:    fs
+        scan-ref:     ${{ inputs.scan-path }}
+        scanners:     license
+        severity:     ${{ inputs.severity }}
+        trivy-config: ${{ steps.license-config.outputs.config_path }}
+        format:       json
+        output:       trivy-license-raw.json
+        exit-code:    "0"
+
+    # ── Enrich JSON with metadata ────────────────────────────────────────────
+    - name: Enrich license report with metadata
+      id: enrich
+      if: always()
+      continue-on-error: true
+      shell: bash
+      env:
+        # The effective list (default applied, entries trimmed), not the raw input.
+        FORBIDDEN: ${{ steps.license-config.outputs.forbidden }}
+        SEVERITY:  ${{ inputs.severity }}
+      run: |
+        RAW_FILE="trivy-license-raw.json"
+        [ -f "$RAW_FILE" ] || echo '{"Results":[]}' > "$RAW_FILE"
+
+        # Count total packages and violations
+        TOTAL_PKGS=$(jq '[.Results[].Licenses // [] | length] | add // 0' "$RAW_FILE" 2>/dev/null || echo "0")
+        VIOLATIONS=$(jq '[.Results[].Licenses // [] | .[] | select(.Category == "forbidden")] | length' "$RAW_FILE" 2>/dev/null || echo "0")
+
+        # Read the raw report via --slurpfile (from the file path) rather than
+        # --argjson "$(cat ...)" — inlining a large report into jq's argv blows
+        # past the kernel ARG_MAX limit ("Argument list too long"). slurpfile
+        # wraps the file's single object in an array, hence $raw[0].
+        jq -n \
+          --slurpfile raw "$RAW_FILE" \
+          --arg forbidden "$FORBIDDEN" \
+          --arg severity "$SEVERITY" \
+          --argjson total_packages "$TOTAL_PKGS" \
+          --argjson violation_count "$VIOLATIONS" \
+          '{
+            meta: {
+              forbidden_licenses: ($forbidden | split(",") | map(select(length > 0))),
+              severity_filter: $severity,
+              total_packages: $total_packages,
+              violation_count: $violation_count
+            },
+            results: $raw[0].Results
+          }' > license-report.json
+
+    # ── Upload JSON report artifact ──────────────────────────────────────────
+    - name: Upload license report artifact
+      id: upload
+      if: always()
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: license-report${{ inputs.artifact-suffix }}
+        path: license-report.json
+        retention-days: 7
+        if-no-files-found: warn
+
+    # ── Preflight: verify code scanning availability before SARIF upload ─────
+    # upload-sarif is a string in a composite: compare to 'true' ('false' is a
+    # non-empty string and would be truthy on its own).
+    - name: Check code scanning availability
+      id: code-scanning-preflight
+      if: inputs.upload-sarif == 'true' && !cancelled()
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        API_URL:  ${{ github.api_url }}
+        REPO:     ${{ github.repository }}
+      run: |
+        set +e
+        HTTP_CODE=$(curl -sS -o cs-preflight.json -w "%{http_code}" \
+          -H "Authorization: Bearer ${GH_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "${API_URL}/repos/${REPO}/code-scanning/alerts?per_page=1")
+        CURL_EXIT=$?
+        set -e
+
+        if [ "${CURL_EXIT}" -ne 0 ]; then
+          echo "::warning::SARIF upload skipped: unable to reach GitHub code-scanning API."
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ "${HTTP_CODE}" = "200" ]; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        MESSAGE=$(jq -r '.message // empty' cs-preflight.json 2>/dev/null || true)
+        if [ -n "${MESSAGE}" ]; then
+          echo "::warning::SARIF upload skipped: ${MESSAGE} (HTTP ${HTTP_CODE})."
+        else
+          echo "::warning::SARIF upload skipped: code scanning unavailable (HTTP ${HTTP_CODE})."
+        fi
+        echo "available=false" >> "$GITHUB_OUTPUT"
+
+    # ── Scan 3: SARIF (GitHub Security tab) ──────────────────────────────────
+    # SARIF is supplementary; it must never fail the action. The verdict
+    # comes from the table scan above.
+    - name: Trivy license scan — SARIF (Security tab)
+      if: inputs.upload-sarif == 'true' && !cancelled() && steps.code-scanning-preflight.outputs.available == 'true'
+      continue-on-error: true
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        scan-type:    fs
+        scan-ref:     ${{ inputs.scan-path }}
+        scanners:     license
+        severity:     ${{ inputs.severity }}
+        trivy-config: ${{ steps.license-config.outputs.config_path }}
+        format:       sarif
+        output:       trivy-license.sarif
+        exit-code:    "0"
+
+    - name: Upload SARIF to GitHub Security tab
+      if: inputs.upload-sarif == 'true' && !cancelled() && steps.code-scanning-preflight.outputs.available == 'true'
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: trivy-license.sarif
+        category:   license-compliance
+
+    # ── Verdict ──────────────────────────────────────────────────────────────
+    # findings: the table scan ran and failed (as v1: any table failure).
+    # clean:    the table scan passed AND the JSON report was produced and
+    #           uploaded.
+    # error:    the table scan did not run (install or config failed), or
+    #           the report is missing after a clean scan.
+    - name: Record licence scan verdict
+      id: verdict
+      if: always()
+      shell: bash
+      env:
+        TABLE_OUTCOME:  ${{ steps.trivy-table.outcome }}
+        JSON_OUTCOME:   ${{ steps.trivy-json.outcome }}
+        ENRICH_OUTCOME: ${{ steps.enrich.outcome }}
+        UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+      run: |
+        REPORT="license-report.json"
+        COUNT="$(jq '.meta.violation_count' "${REPORT}" 2>/dev/null || true)"
+        [[ "${COUNT}" =~ ^[0-9]+$ ]] || COUNT=""
+
+        if [ "${TABLE_OUTCOME}" = "failure" ]; then
+          RESULT="findings"
+        elif [ "${TABLE_OUTCOME}" = "success" ] && [ "${JSON_OUTCOME}" = "success" ] \
+             && [ "${ENRICH_OUTCOME}" = "success" ] && [ "${UPLOAD_OUTCOME}" = "success" ]; then
+          RESULT="clean"
+        else
+          RESULT="error"
+        fi
+
+        echo "Licence scan result: ${RESULT} (table scan ${TABLE_OUTCOME:-none}, violations ${COUNT:-unknown})"
+        {
+          echo "result=${RESULT}"
+          echo "findings-count=${COUNT}"
+          echo "report-path=${REPORT}"
+        } >> "$GITHUB_OUTPUT"
+
+    # ── Fail if violations were found (or the scan did not complete) ─────────
+    # Runs unless the verdict is clean. A missing verdict fails (fail closed).
+    - name: Fail if license violations detected
+      if: ${{ !cancelled() && inputs.fail-on-findings != 'false' && steps.verdict.outputs.result != 'clean' }}
+      shell: bash
+      env:
+        RESULT:          ${{ steps.verdict.outputs.result }}
+        COUNT:           ${{ steps.verdict.outputs.findings-count }}
+        INSTALL_OUTCOME: ${{ steps.install.outcome }}
+        CONFIG_OUTCOME:  ${{ steps.license-config.outcome }}
+        ARTIFACT:        license-report${{ inputs.artifact-suffix }}
+      run: |
+        if [ "${RESULT}" = "findings" ]; then
+          echo "::error::${COUNT:-unknown} license violation(s) detected. Review the '${ARTIFACT}' artifact for details."
+        elif [ "${INSTALL_OUTCOME}" != "success" ]; then
+          echo "::error::install-command failed (see 'Install production dependencies' above); the licence scan did not run."
+        elif [ "${CONFIG_OUTCOME}" != "success" ]; then
+          echo "::error::Could not build the Trivy licence config (see 'Prepare Trivy license config' above); the licence scan did not run."
+        else
+          echo "::error::The licence scan found no violations, but the '${ARTIFACT}' report could not be produced or uploaded; see the report steps above."
+        fi
+        exit 1

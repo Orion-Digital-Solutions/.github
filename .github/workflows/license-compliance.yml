@@ -38,6 +38,11 @@ name: License Compliance (Reusable)
 # As a consulting firm delivering software to enterprise clients, GPL/AGPL
 # licenses in transitive dependencies can create contractual and IP obligations.
 #
+# ── Implementation ───────────────────────────────────────────────────────────
+# The steps live in the composite action .github/actions/licence-scan, which
+# the CI orchestrator also runs inside its fast-checks job (v2). This
+# workflow keeps the v1 interface: inputs, job id, job name and permissions.
+#
 # ── Artifacts ────────────────────────────────────────────────────────────────
 # Uploads `license-report` artifact (JSON) for the CI orchestrator report job.
 # Also uploads SARIF to the GitHub Security tab (Code Scanning).
@@ -47,10 +52,10 @@ on:
   workflow_call:
     inputs:
       # Empty means the default list. The default lives in ONE place: the
-      # DEFAULT_FORBIDDEN_LICENSES env on the license-check job below. (The
-      # orchestrator always passes this input, as "" when its caller doesn't.)
+      # DEFAULT_FORBIDDEN_LICENSES env in .github/actions/licence-scan/action.yml.
+      # (The orchestrator always passes this input, as "" when its caller doesn't.)
       forbidden-licenses:
-        description: "Comma-separated SPDX license IDs to treat as violations. Leave blank for the default list (DEFAULT_FORBIDDEN_LICENSES in this workflow)."
+        description: "Comma-separated SPDX license IDs to treat as violations. Leave blank for the default list (DEFAULT_FORBIDDEN_LICENSES in .github/actions/licence-scan/action.yml)."
         required: false
         type: string
         default: ""
@@ -108,201 +113,21 @@ jobs:
       contents: read
       security-events: write
       actions: read
-    # Single source of the default forbidden list, used when the
-    # forbidden-licenses input is blank.
-    env:
-      DEFAULT_FORBIDDEN_LICENSES: "GPL-2.0,GPL-3.0,AGPL-1.0,AGPL-3.0,LGPL-2.0,LGPL-2.1,LGPL-3.0,EUPL-1.1,EUPL-1.2,CCDL-1.0,OSL-3.0"
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # ── Optional: install dependencies so Trivy can read their licences ──
-      # Without this, pip/pnpm/Yarn/Go packages are listed with no licence
-      # and cannot match the forbidden list. A failing command fails the job.
-      - name: Install production dependencies
-        shell: bash
-        env:
-          INSTALL_COMMAND: ${{ inputs.install-command }}
-        run: |
-          if [ -z "${INSTALL_COMMAND//[[:space:]]/}" ]; then
-            echo "::warning::No install-command set: licences for pip, pnpm, Yarn and Go dependencies cannot be read from lock files alone, so the licence gate may pass without checking them. Set install-command to install production dependencies before the scan."
-            exit 0
-          fi
-          bash -c "${INSTALL_COMMAND}"
-
-      # ── Build Trivy config from inputs ───────────────────────────────────
-      # Lists are split on commas (or newlines), trimmed, and blank entries
-      # dropped. A blank forbidden list falls back to the default; a blank
-      # allowed list writes no `ignored:` key. jq writes the config as JSON,
-      # which is valid YAML and quotes every entry safely.
-      - name: Prepare Trivy license config
-        id: license-config
-        shell: bash
-        env:
-          FORBIDDEN: ${{ inputs.forbidden-licenses }}
-          ALLOWED:   ${{ inputs.allowed-licenses }}
-        run: |
-          jq -n \
-            --arg forbidden "$FORBIDDEN" \
-            --arg default "$DEFAULT_FORBIDDEN_LICENSES" \
-            --arg allowed "$ALLOWED" \
-            'def list: [splits("[,\n]") | sub("^[[:space:]]+"; "") | sub("[[:space:]]+$"; "") | select(length > 0)];
-             ($forbidden | list) as $f
-             | ($allowed | list) as $a
-             | {license: (
-                 {forbidden: (if ($f | length) > 0 then $f else ($default | list) end)}
-                 + (if ($a | length) > 0 then {ignored: $a} else {} end)
-               )}' > trivy-license.yaml
-
-          EFFECTIVE=$(jq -r '.license.forbidden | join(",")' trivy-license.yaml)
-          echo "Forbidden licences: ${EFFECTIVE}"
-          echo "forbidden=${EFFECTIVE}" >> "$GITHUB_OUTPUT"
-          echo "config_path=trivy-license.yaml" >> "$GITHUB_OUTPUT"
-
-      # ── Scan 1: Table (job log summary) — fails on violations ────────────
-      - name: Trivy license scan — table (fail on violations)
-        id: trivy-table
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      # Install command, Trivy config, table/JSON/SARIF scans, report,
+      # artifact and the final pass/fail all live in the composite action
+      # (same commit as this workflow, via the self-repository `$/` prefix).
+      - name: OSS licence scan
+        uses: $/.github/actions/licence-scan
         with:
-          scan-type:    fs
-          scan-ref:     ${{ inputs.scan-path }}
-          scanners:     license
-          severity:     ${{ inputs.severity }}
-          trivy-config: ${{ steps.license-config.outputs.config_path }}
-          format:       table
-          exit-code:    "1"
-
-      # ── Scan 2: JSON (artifact for report) ───────────────────────────────
-      - name: Trivy license scan — JSON (report artifact)
-        if: always()
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type:    fs
-          scan-ref:     ${{ inputs.scan-path }}
-          scanners:     license
-          severity:     ${{ inputs.severity }}
-          trivy-config: ${{ steps.license-config.outputs.config_path }}
-          format:       json
-          output:       trivy-license-raw.json
-          exit-code:    "0"
-
-      # ── Enrich JSON with metadata ─────────────────────────────────────────
-      - name: Enrich license report with metadata
-        if: always()
-        shell: bash
-        env:
-          # The effective list (default applied, entries trimmed), not the raw input.
-          FORBIDDEN: ${{ steps.license-config.outputs.forbidden }}
-          SEVERITY:  ${{ inputs.severity }}
-        run: |
-          RAW_FILE="trivy-license-raw.json"
-          [ -f "$RAW_FILE" ] || echo '{"Results":[]}' > "$RAW_FILE"
-
-          # Count total packages and violations
-          TOTAL_PKGS=$(jq '[.Results[].Licenses // [] | length] | add // 0' "$RAW_FILE" 2>/dev/null || echo "0")
-          VIOLATIONS=$(jq '[.Results[].Licenses // [] | .[] | select(.Category == "forbidden")] | length' "$RAW_FILE" 2>/dev/null || echo "0")
-
-          # Read the raw report via --slurpfile (from the file path) rather than
-          # --argjson "$(cat ...)" — inlining a large report into jq's argv blows
-          # past the kernel ARG_MAX limit ("Argument list too long"). slurpfile
-          # wraps the file's single object in an array, hence $raw[0].
-          jq -n \
-            --slurpfile raw "$RAW_FILE" \
-            --arg forbidden "$FORBIDDEN" \
-            --arg severity "$SEVERITY" \
-            --argjson total_packages "$TOTAL_PKGS" \
-            --argjson violation_count "$VIOLATIONS" \
-            '{
-              meta: {
-                forbidden_licenses: ($forbidden | split(",") | map(select(length > 0))),
-                severity_filter: $severity,
-                total_packages: $total_packages,
-                violation_count: $violation_count
-              },
-              results: $raw[0].Results
-            }' > license-report.json
-
-      # ── Upload JSON report artifact ───────────────────────────────────────
-      - name: Upload license report artifact
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: license-report
-          path: license-report.json
-          retention-days: 7
-          if-no-files-found: warn
-
-      # ── Preflight: verify code scanning availability before SARIF upload ───
-      - name: Check code scanning availability
-        id: code-scanning-preflight
-        if: inputs.upload-sarif && !cancelled()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          API_URL:  ${{ github.api_url }}
-          REPO:     ${{ github.repository }}
-        run: |
-          set +e
-          HTTP_CODE=$(curl -sS -o cs-preflight.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "${API_URL}/repos/${REPO}/code-scanning/alerts?per_page=1")
-          CURL_EXIT=$?
-          set -e
-
-          if [ "${CURL_EXIT}" -ne 0 ]; then
-            echo "::warning::SARIF upload skipped: unable to reach GitHub code-scanning API."
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ "${HTTP_CODE}" = "200" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          MESSAGE=$(jq -r '.message // empty' cs-preflight.json 2>/dev/null || true)
-          if [ -n "${MESSAGE}" ]; then
-            echo "::warning::SARIF upload skipped: ${MESSAGE} (HTTP ${HTTP_CODE})."
-          else
-            echo "::warning::SARIF upload skipped: code scanning unavailable (HTTP ${HTTP_CODE})."
-          fi
-          echo "available=false" >> "$GITHUB_OUTPUT"
-
-      # ── Scan 3: SARIF (GitHub Security tab) ──────────────────────────────
-      # SARIF is supplementary; it must never fail the job. The verdict
-      # comes from the table scan above.
-      - name: Trivy license scan — SARIF (Security tab)
-        if: inputs.upload-sarif && !cancelled() && steps.code-scanning-preflight.outputs.available == 'true'
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type:    fs
-          scan-ref:     ${{ inputs.scan-path }}
-          scanners:     license
-          severity:     ${{ inputs.severity }}
-          trivy-config: ${{ steps.license-config.outputs.config_path }}
-          format:       sarif
-          output:       trivy-license.sarif
-          exit-code:    "0"
-
-      - name: Upload SARIF to GitHub Security tab
-        if: inputs.upload-sarif && !cancelled() && steps.code-scanning-preflight.outputs.available == 'true'
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
-        with:
-          sarif_file: trivy-license.sarif
-          category:   license-compliance
-
-      # ── Fail the job if violations were found ────────────────────────────
-      - name: Fail if license violations detected
-        if: steps.trivy-table.outcome == 'failure'
-        shell: bash
-        run: |
-          COUNT=$(jq '.meta.violation_count' license-report.json 2>/dev/null || echo "unknown")
-          echo "::error::${COUNT} license violation(s) detected. Review the 'license-report' artifact for details."
-          exit 1
+          forbidden-licenses: ${{ inputs.forbidden-licenses }}
+          allowed-licenses:   ${{ inputs.allowed-licenses }}
+          scan-path:          ${{ inputs.scan-path }}
+          severity:           ${{ inputs.severity }}
+          install-command:    ${{ inputs.install-command }}
+          upload-sarif:       ${{ inputs.upload-sarif }}

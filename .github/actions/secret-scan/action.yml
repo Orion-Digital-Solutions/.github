@@ -1,0 +1,428 @@
+name: Gitleaks secret scan
+description: >-
+  Gitleaks secret detection for Orion repositories (ROADMAP 6.3, see
+  docs/v2-design.md). Installs a hash-verified Gitleaks, resolves the commit
+  range for the event, scans it, and uploads a JSON report artifact. Does not
+  check out code: the calling job must check out the repository with
+  fetch-depth 0 and persist-credentials false. Reports its verdict in the
+  `result` output and fails only in its last step, and only when
+  `fail-on-findings` is true, so a job can run several scans and record every
+  result before failing.
+
+# ── Delta scanning behaviour ──────────────────────────────────────────────────
+# Pull requests  → scans only the commits in the PR diff (not full history).
+# Push to branch → scans only the newly pushed commits. After a force-push
+#                  (old head gone) → the new head's commits that are on no
+#                  other branch, with a warning.
+# Scheduled run  → full repository history scan.
+#
+# ── Artifacts ────────────────────────────────────────────────────────────────
+# Uploads `gitleaks-report<artifact-suffix>` (JSON) after every scan. The CI
+# orchestrator report reads this artifact to render findings.
+#
+# ── Custom rules ─────────────────────────────────────────────────────────────
+# Place a .gitleaks.toml file in the calling repository root to extend or
+# override rules (e.g. to allowlist known false positives).
+# On pull requests the config and .gitleaksignore are read from the BASE
+# branch, not the PR head, so a PR cannot allowlist its own secret: a new or
+# changed .gitleaks.toml / .gitleaksignore takes effect only once it is merged.
+# Other events use the checked-out files. Inline `gitleaks:allow` comments in
+# the PR's own lines are still honoured; reviewers should watch for them.
+#
+# ── Exit status and verdict ──────────────────────────────────────────────────
+# Gitleaks runs with --exit-code 2: 0 = clean, 2 = secrets found, anything
+# else = Gitleaks failed to run (reported as such, not as a finding). A git
+# error during the scan also counts as a failure (see the scan step).
+# `result` output: clean | findings | error. `error` also covers a failed
+# install, range or config step, and a report that could not be written or
+# uploaded after a clean scan. Every step that can fail is continue-on-error;
+# the verdict step reads their outcomes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+inputs:
+  full-scan:
+    description: "Scan the full git history (forced on schedule events). 'true' or 'false'."
+    required: false
+    default: "false"
+
+  gitleaks-version:
+    # Keep in sync with PINNED_VERSION / PINNED_SHA256 in the install step,
+    # and with the default of the same input in workflows/secret-scanning.yml.
+    description: "Gitleaks version to pin (e.g. v8.30.1). Versions before v8.19.0 fall back to the deprecated `detect` command with a warning"
+    required: false
+    default: "v8.30.1"
+
+  gitleaks-license:
+    description: "Gitleaks license key (optional). Composite actions cannot read secrets, so pass secrets.GITLEAKS_LICENSE here."
+    required: false
+    default: ""
+
+  artifact-suffix:
+    description: "Appended verbatim to the artifact name `gitleaks-report` (e.g. '-fast-checks'). Empty keeps the v1 name."
+    required: false
+    default: ""
+
+  fail-on-findings:
+    description: "'true' (default): the last step fails when `result` is not clean (findings or error). 'false': never fail; read the `result` output instead."
+    required: false
+    default: "true"
+
+outputs:
+  result:
+    description: "clean | findings | error"
+    value: ${{ steps.verdict.outputs.result }}
+  findings-count:
+    description: "Number of findings in the report (may be non-zero for a partial scan with result 'error'). Empty when the report could not be read."
+    value: ${{ steps.verdict.outputs.findings-count }}
+  report-path:
+    description: "Path of the JSON report (meta + findings), relative to the workspace."
+    value: ${{ steps.verdict.outputs.report-path }}
+
+runs:
+  using: composite
+  steps:
+    # ── Install Gitleaks CLI ─────────────────────────────────────────────────
+    # We use the CLI directly (not the action wrapper) so we can control
+    # the output format and capture structured JSON for the report artifact.
+    # The tarball is verified before it is extracted; a missing hash or a
+    # mismatch fails the step (fail closed). The DEFAULT version must match
+    # the sha256 pinned below, so a tampered release cannot swap both the
+    # tarball and its checksums file. A caller-chosen version has no pinned
+    # hash and is checked against the release's checksums file, with a warning.
+    - name: Install Gitleaks
+      id: install
+      continue-on-error: true
+      shell: bash
+      env:
+        VERSION: ${{ inputs.gitleaks-version }}
+        # The one place the pinned hash lives. When bumping the
+        # `gitleaks-version` default, update both lines from the release's
+        # checksums file (cross-check the asset digest on the release page).
+        PINNED_VERSION: v8.30.1
+        PINNED_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+      run: |
+        VER="${VERSION#v}"    # strip leading 'v' for the filename
+        TARBALL="gitleaks_${VER}_linux_x64.tar.gz"
+        CHECKSUMS="gitleaks_${VER}_checksums.txt"
+        BASE_URL="https://github.com/gitleaks/gitleaks/releases/download/${VERSION}"
+        WORK_DIR="$(mktemp -d "${RUNNER_TEMP}/gitleaks-install.XXXXXX")"
+
+        # -f: fail on HTTP errors instead of saving an error page.
+        echo "Downloading gitleaks ${VERSION} from ${BASE_URL}/${TARBALL}"
+        curl -fsSL -o "${WORK_DIR}/${TARBALL}" "${BASE_URL}/${TARBALL}"
+
+        if [ "${VERSION}" = "${PINNED_VERSION}" ]; then
+          EXPECTED="${PINNED_SHA256}"
+          HASH_SOURCE="the sha256 pinned in this action"
+        else
+          echo "::warning::Gitleaks ${VERSION} is not the default (${PINNED_VERSION}), so its hash is not pinned in this action; verifying against the release's ${CHECKSUMS} only."
+          curl -fsSL -o "${WORK_DIR}/${CHECKSUMS}" "${BASE_URL}/${CHECKSUMS}"
+          # Exactly one well-formed entry for our tarball must be present.
+          EXPECTED="$(awk -v f="${TARBALL}" '$2 == f { print $1 }' "${WORK_DIR}/${CHECKSUMS}")"
+          HASH_SOURCE="${CHECKSUMS}"
+        fi
+        if ! [[ "${EXPECTED}" =~ ^[0-9a-f]{64}$ ]]; then
+          echo "::error::No single well-formed SHA-256 for ${TARBALL} from ${HASH_SOURCE}; refusing to install."
+          exit 1
+        fi
+        ACTUAL="$(sha256sum "${WORK_DIR}/${TARBALL}" | awk '{ print $1 }')"
+        if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+          echo "::error::Checksum mismatch for ${TARBALL}: expected ${EXPECTED} (from ${HASH_SOURCE}), got ${ACTUAL}; refusing to install."
+          exit 1
+        fi
+        echo "Checksum OK (${HASH_SOURCE}): ${ACTUAL}  ${TARBALL}"
+
+        tar -xzf "${WORK_DIR}/${TARBALL}" -C "${WORK_DIR}" gitleaks
+        sudo mv "${WORK_DIR}/gitleaks" /usr/local/bin/gitleaks
+        gitleaks version
+
+    # ── Build scan log options ───────────────────────────────────────────────
+    # log_opts is ONE argument (`--log-opts=<git log args>`); Gitleaks splits
+    # the value on single spaces itself, so the scan step passes it quoted.
+    - name: Resolve scan range
+      id: range
+      if: steps.install.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        FULL_SCAN:  ${{ inputs.full-scan }}
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_REF:   ${{ github.base_ref }}
+        BEFORE_SHA: ${{ github.event.before }}
+        HEAD_SHA:   ${{ github.sha }}
+        GIT_REF:    ${{ github.ref }}
+      run: |
+        if [ "${FULL_SCAN}" = "true" ] || [ "${EVENT_NAME}" = "schedule" ]; then
+          echo "log_opts=--log-opts=--all"    >> "$GITHUB_OUTPUT"
+          echo "scan_type=full-history"       >> "$GITHUB_OUTPUT"
+        elif [ "${EVENT_NAME}" = "pull_request" ]; then
+          echo "log_opts=--log-opts=origin/${BASE_REF}...HEAD" >> "$GITHUB_OUTPUT"
+          echo "scan_type=pr-diff"            >> "$GITHUB_OUTPUT"
+        elif [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+          echo "log_opts=--log-opts=${BEFORE_SHA}...${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "scan_type=push-delta"         >> "$GITHUB_OUTPUT"
+        elif [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
+          # Force-push: the old head is no longer in any fetched ref, so
+          # BEFORE...HEAD cannot resolve (git log would fail). Scan the commits
+          # reachable from the new head that are on no OTHER origin branch,
+          # i.e. the rewritten commits. The pushed branch itself (and
+          # origin/HEAD, which may point at it) is excluded, or the range
+          # would be empty. Ref names cannot contain spaces or glob
+          # characters, so the --exclude patterns are literal.
+          REVS=("${HEAD_SHA}" --not --exclude=refs/remotes/origin/HEAD)
+          case "${GIT_REF}" in
+            refs/heads/*) REVS+=("--exclude=refs/remotes/origin/${GIT_REF#refs/heads/}") ;;
+          esac
+          REVS+=("--glob=refs/remotes/origin/*")
+          if COUNT="$(git rev-list --count "${REVS[@]}")"; then
+            echo "::warning::Push 'before' commit ${BEFORE_SHA} is not in the clone (force-push?). Scanning the ${COUNT} commit(s) reachable from ${HEAD_SHA} that are on no other branch, instead of the pushed range."
+            echo "log_opts=--log-opts=${REVS[*]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Push 'before' commit ${BEFORE_SHA} is not in the clone (force-push?) and the fallback range did not resolve. Scanning only the pushed head commit."
+            echo "log_opts=--log-opts=-1"     >> "$GITHUB_OUTPUT"
+          fi
+          echo "scan_type=push-forced"        >> "$GITHUB_OUTPUT"
+        else
+          # First push to branch — scan last commit only
+          echo "log_opts=--log-opts=-1"       >> "$GITHUB_OUTPUT"
+          echo "scan_type=push-initial"       >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Resolve Gitleaks config ──────────────────────────────────────────────
+    # Pull requests: read .gitleaks.toml from the BASE branch (origin/<base>,
+    # present because the calling job checks out with fetch-depth: 0), never
+    # from the PR head, so a PR cannot allowlist its own secret. Gitleaks
+    # auto-loads ./.gitleaks.toml when no --config is given, so if the base
+    # branch has no config but the PR head adds one, pass an explicit
+    # default-rules config. The same applies to .gitleaksignore (see below).
+    # Other events: use the checked-out .gitleaks.toml / .gitleaksignore.
+    - name: Resolve Gitleaks config
+      id: config
+      if: steps.range.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_REF:   ${{ github.base_ref }}
+      run: |
+        CONFIG_PATH=""
+        if [ "${EVENT_NAME}" = "pull_request" ]; then
+          BASE="refs/remotes/origin/${BASE_REF}"
+          if ! git rev-parse --verify --quiet "${BASE}^{commit}" >/dev/null; then
+            echo "::error::Base branch origin/${BASE_REF} is not in the checkout; cannot read its .gitleaks.toml."
+            exit 1
+          fi
+          if git cat-file -e "${BASE}:.gitleaks.toml" 2>/dev/null; then
+            CONFIG_PATH="${RUNNER_TEMP}/gitleaks.toml"
+            git show "${BASE}:.gitleaks.toml" > "${CONFIG_PATH}"
+            echo "Using .gitleaks.toml from base branch ${BASE_REF}."
+            if [ -f ".gitleaks.toml" ] && ! cmp -s ".gitleaks.toml" "${CONFIG_PATH}"; then
+              echo "::notice::This PR changes .gitleaks.toml; the change is ignored until merged. Scanning with the base branch config."
+            fi
+          elif [ -f ".gitleaks.toml" ]; then
+            CONFIG_PATH="${RUNNER_TEMP}/gitleaks-default.toml"
+            printf '[extend]\nuseDefault = true\n' > "${CONFIG_PATH}"
+            echo "::notice::This PR adds .gitleaks.toml; it is ignored until merged. Scanning with the default rules."
+          fi
+
+          # .gitleaksignore (finding fingerprints to skip): Gitleaks v8.30.1
+          # (cmd/root.go Detector) always loads <scan path>/.gitleaksignore,
+          # in addition to --gitleaks-ignore-path (default "."), so no flag
+          # can switch the PR's copy off. Replace the working-tree file with
+          # the base branch version (or remove it) before the scan. Safe:
+          # this action never commits, and `gitleaks git` scans git history,
+          # not the working tree.
+          # Inline `gitleaks:allow` comments are NOT handled here: they live
+          # in the scanned lines themselves and are left to code review.
+          BASE_IGNORE="${RUNNER_TEMP}/gitleaksignore.base"
+          if git cat-file -e "${BASE}:.gitleaksignore" 2>/dev/null; then
+            git show "${BASE}:.gitleaksignore" > "${BASE_IGNORE}"
+            if [ -L ".gitleaksignore" ] || ! cmp -s ".gitleaksignore" "${BASE_IGNORE}"; then
+              echo "::notice::This PR changes .gitleaksignore; the change is ignored until merged. Scanning with the base branch .gitleaksignore."
+            fi
+            rm -rf -- ".gitleaksignore"
+            cp -- "${BASE_IGNORE}" ".gitleaksignore"
+            echo "Using .gitleaksignore from base branch ${BASE_REF}."
+          elif [ -e ".gitleaksignore" ] || [ -L ".gitleaksignore" ]; then
+            rm -rf -- ".gitleaksignore"
+            echo "::notice::This PR adds .gitleaksignore; it is ignored until merged."
+          fi
+        elif [ -f ".gitleaks.toml" ]; then
+          CONFIG_PATH=".gitleaks.toml"
+        fi
+        echo "config_path=${CONFIG_PATH}" >> "$GITHUB_OUTPUT"
+
+    # ── Run Gitleaks ─────────────────────────────────────────────────────────
+    # `gitleaks git [path]` replaces the deprecated `gitleaks detect
+    # --source`; the other flags are unchanged (v8.30.1 cmd/git.go, root.go).
+    # Exit status (v8.30.1, cmd/root.go findingSummaryAndExit): --exit-code
+    # is used ONLY when leaks are found and the scan had no error; an error
+    # exits 1 (126 for an unknown flag), even if a partial scan found leaks.
+    # BUT since v8.19 a git failure (bad range, corrupt pack, any git stderr
+    # line Gitleaks does not whitelist) is only logged as "[git] ..." and
+    # ends the scan early with no error (sources/git.go Fragments, detect.go
+    # DetectSource), so Gitleaks can exit 0 or 2 after a partial scan. Logs
+    # go to stderr (findings to stdout), so stderr is captured and any
+    # "[git] " line turns the status into 1. Net: with --exit-code 2,
+    # 0 = clean, 2 = leaks, anything else = Gitleaks failed.
+    # This step records the status and succeeds; the verdict step below
+    # turns it into `result`.
+    - name: Gitleaks scan
+      id: scan
+      if: steps.config.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        GITLEAKS_LICENSE: ${{ inputs.gitleaks-license }}
+        LOG_OPTS:         ${{ steps.range.outputs.log_opts }}
+        SCAN_TYPE:        ${{ steps.range.outputs.scan_type }}
+        CONFIG_PATH:      ${{ steps.config.outputs.config_path }}
+        GITLEAKS_VERSION: ${{ inputs.gitleaks-version }}
+      run: |
+        echo "Scan type: ${SCAN_TYPE}"
+        # Config resolved by the previous step (base-branch copy on PRs)
+        CONFIG_ARGS=()
+        if [ -n "${CONFIG_PATH}" ]; then CONFIG_ARGS=("--config=${CONFIG_PATH}"); fi
+        STDERR_LOG="${RUNNER_TEMP}/gitleaks-stderr.log"
+
+        # `gitleaks git` exists from v8.19.0. Callers that still pin an older
+        # version keep the legacy `detect --source` form (v1 is non-breaking).
+        SCAN_CMD=(git .)
+        V="${GITLEAKS_VERSION#v}"
+        if [ "$(printf '%s\n%s\n' "$V" "8.19.0" | sort -V | head -n1)" != "8.19.0" ]; then
+          echo "::warning::gitleaks-version ${GITLEAKS_VERSION} predates 'gitleaks git'; using the deprecated 'detect' command. Please move to v8.19.0 or later."
+          SCAN_CMD=(detect --source .)
+        fi
+
+        # bash runs with -e: suspend it so a non-zero exit is recorded
+        # instead of ending the step.
+        set +e
+        gitleaks "${SCAN_CMD[@]}" \
+          "${LOG_OPTS}" \
+          "${CONFIG_ARGS[@]}" \
+          --report-format json \
+          --report-path gitleaks-report.json \
+          --redact \
+          --verbose \
+          --exit-code 2 \
+          2> "${STDERR_LOG}"
+        GITLEAKS_EXIT=$?
+        set -e
+        cat "${STDERR_LOG}" >&2
+
+        if [ "${GITLEAKS_EXIT}" != "1" ] && grep -qF '[git] ' "${STDERR_LOG}"; then
+          echo "::error::git failed during the Gitleaks scan (see the '[git]' lines above); the scan is incomplete, so Gitleaks' exit ${GITLEAKS_EXIT} is treated as a failure (1)."
+          GITLEAKS_EXIT=1
+        fi
+
+        echo "gitleaks_exit=${GITLEAKS_EXIT}" >> "$GITHUB_OUTPUT"
+        echo "Gitleaks exit status: ${GITLEAKS_EXIT}"
+
+    # Ensure the report file always exists (empty array when no findings)
+    - name: Ensure report file exists
+      id: report
+      if: always()
+      continue-on-error: true
+      shell: bash
+      env:
+        SCAN_TYPE:        ${{ steps.range.outputs.scan_type }}
+        GITLEAKS_VERSION: ${{ inputs.gitleaks-version }}
+        HEAD_SHA:         ${{ github.sha }}
+      run: |
+        [ -f gitleaks-report.json ] || echo "[]" > gitleaks-report.json
+
+        # Inject metadata for the report job to consume
+        # Read findings via --slurpfile (from the file path) rather than
+        # --argjson "$(cat ...)" — inlining a large report into jq's argv blows
+        # past the kernel ARG_MAX limit ("Argument list too long"). slurpfile
+        # wraps the file's single value (the findings array) in an array, hence
+        # $findings[0].
+        jq -n \
+          --slurpfile findings gitleaks-report.json \
+          --arg scan_type "${SCAN_TYPE}" \
+          --arg gitleaks_version "${GITLEAKS_VERSION}" \
+          --arg sha "${HEAD_SHA}" \
+          '{
+            meta: {
+              scan_type: $scan_type,
+              gitleaks_version: $gitleaks_version,
+              sha: $sha
+            },
+            findings: $findings[0]
+          }' > gitleaks-full-report.json
+
+    # ── Upload report artifact ───────────────────────────────────────────────
+    - name: Upload Gitleaks report artifact
+      id: upload
+      if: always()
+      continue-on-error: true
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: gitleaks-report${{ inputs.artifact-suffix }}
+        path: gitleaks-full-report.json
+        retention-days: 7
+        if-no-files-found: warn
+
+    # ── Verdict ──────────────────────────────────────────────────────────────
+    # findings: Gitleaks exited 2 (leaks found, scan complete).
+    # clean:    Gitleaks exited 0 AND the report was written and uploaded.
+    # error:    anything else (install/range/config failed, Gitleaks or git
+    #           failed, missing status, or no report after a clean scan).
+    # An empty/missing status is an error: fail closed.
+    - name: Record secret scan verdict
+      id: verdict
+      if: always()
+      shell: bash
+      env:
+        SCAN_OUTCOME:   ${{ steps.scan.outcome }}
+        GITLEAKS_EXIT:  ${{ steps.scan.outputs.gitleaks_exit }}
+        REPORT_OUTCOME: ${{ steps.report.outcome }}
+        UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+      run: |
+        REPORT="gitleaks-full-report.json"
+        COUNT="$(jq '.findings | length' "${REPORT}" 2>/dev/null || true)"
+        [[ "${COUNT}" =~ ^[0-9]+$ ]] || COUNT=""
+
+        if [ "${SCAN_OUTCOME}" = "success" ] && [ "${GITLEAKS_EXIT}" = "2" ]; then
+          RESULT="findings"
+        elif [ "${SCAN_OUTCOME}" = "success" ] && [ "${GITLEAKS_EXIT}" = "0" ] \
+             && [ "${REPORT_OUTCOME}" = "success" ] && [ "${UPLOAD_OUTCOME}" = "success" ]; then
+          RESULT="clean"
+        else
+          RESULT="error"
+        fi
+
+        echo "Secret scan result: ${RESULT} (Gitleaks exit ${GITLEAKS_EXIT:-none}, findings ${COUNT:-unknown})"
+        {
+          echo "result=${RESULT}"
+          echo "findings-count=${COUNT}"
+          echo "report-path=${REPORT}"
+        } >> "$GITHUB_OUTPUT"
+
+    # ── Fail if secrets were detected (or the scan did not complete) ─────────
+    # Runs unless the verdict is clean. A missing verdict fails (fail closed).
+    - name: Fail if secrets detected
+      if: ${{ !cancelled() && inputs.fail-on-findings != 'false' && steps.verdict.outputs.result != 'clean' }}
+      shell: bash
+      env:
+        RESULT:        ${{ steps.verdict.outputs.result }}
+        COUNT:         ${{ steps.verdict.outputs.findings-count }}
+        GITLEAKS_EXIT: ${{ steps.scan.outputs.gitleaks_exit }}
+        ARTIFACT:      gitleaks-report${{ inputs.artifact-suffix }}
+      run: |
+        if [ "${RESULT}" = "findings" ]; then
+          echo "::error::Gitleaks detected ${COUNT:-unknown} secret(s). Review the '${ARTIFACT}' artifact and rotate any exposed credentials immediately."
+        elif [ -z "${GITLEAKS_EXIT}" ]; then
+          echo "::error::Gitleaks did not run: an earlier step (install, scan range or config) failed; see its log above. This is not a secret finding."
+        elif [ "${GITLEAKS_EXIT}" = "0" ]; then
+          echo "::error::Gitleaks found no secrets, but the '${ARTIFACT}' report could not be written or uploaded; see the report steps above."
+        else
+          echo "::error::Gitleaks failed to run (exit ${GITLEAKS_EXIT}); the scan did not complete, so this is not a secret finding. See the 'Gitleaks scan' step log."
+          # Gitleaks writes the report before exiting on a git error, so a
+          # partial scan may still have findings; surface them separately.
+          if [[ "${COUNT}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::warning::The partial scan still reported ${COUNT} possible secret(s); see the '${ARTIFACT}' artifact."
+          fi
+        fi
+        exit 1
