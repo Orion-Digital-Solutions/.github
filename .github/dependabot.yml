@@ -18,6 +18,11 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
+    # Held on purpose for v1 (ROADMAP 3.6): hadolint-action v3.5.0 ships
+    # Hadolint 2.15, whose new rules (e.g. DL3066, which flags `USER node`)
+    # would newly fail lint in caller repos. Remove this when v2 adopts it.
+    ignore:
+      - dependency-name: "hadolint/hadolint-action"
     commit-message:
       prefix: ci
     groups:
