@@ -366,10 +366,10 @@ jobs:
 
           # ── Copy ──
           COPIED=0; REFUSED=0; MISSING=0
-          declare -A DONE=()
+          declare -A COPIED_SET=()
           copy_one() {  # $1 = source (absolute), $2 = destination (workspace-relative, clean)
             local src="$1" dst="$2" part="" c
-            [ -n "${DONE[${dst}]:-}" ] && return 0
+            [ -n "${COPIED_SET[${dst}]:-}" ] && return 0
             if [ ! -f "${src}" ] || [ -L "${src}" ]; then
               echo "::warning::Not copied: '${src#"${SRC_ROOT}"/}' in the artifact is not a regular file."; REFUSED=$((REFUSED+1)); return 0
             fi
@@ -395,7 +395,7 @@ jobs:
               *) echo "::warning::Not copied: '${dst}' resolves outside the workspace."; REFUSED=$((REFUSED+1)); return 0 ;;
             esac
             mkdir -p -- "$(dirname -- "${dst}")" && cp -- "${src}" "${dst}" || { REFUSED=$((REFUSED+1)); return 0; }
-            DONE[${dst}]=1
+            COPIED_SET[${dst}]=1
             COPIED=$((COPIED+1))
             echo "Copied coverage report: ${dst}"
           }
