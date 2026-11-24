@@ -1,5 +1,7 @@
 # Orion Digital Solutions — `.github`
 
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/Orion-Digital-Solutions/.github/badge)](https://scorecard.dev/viewer/?uri=github.com/Orion-Digital-Solutions/.github)
+
 This is the **central engineering standards repository** for the Orion Digital Solutions GitHub organization. It serves two purposes:
 
 1. **Org-wide defaults** — community health files, issue/PR templates, and governance docs that GitHub automatically applies to every repository that does not define its own.
@@ -758,6 +760,21 @@ sonar.coverage.exclusions=**/tests/**,**/__init__.py
 ```
 
 ---
+
+### Dependabot pull requests and secrets
+
+Workflows triggered by Dependabot pull requests **do not receive Actions secrets** (they get only the Dependabot secrets store) and run with a read-only `GITHUB_TOKEN`. With the shared CI this means:
+
+- **SonarCloud fails** on Dependabot PRs: `SONAR_TOKEN` is empty, so the scanner cannot authenticate.
+- **The CI Report** shows no SonarCloud detail (`SONAR_ISSUE_RETRIEVAL` is empty).
+- **Docker builds** that need `AZURE_NPM_TOKEN` fail to install private packages.
+
+Pick one per repository:
+
+1. **Recommended:** add the needed tokens as **Dependabot secrets** (Organization or repository Settings → Secrets and variables → **Dependabot**), using separate, read-only tokens where the provider allows it. They are passed to the same secret names.
+2. Skip the scan for Dependabot in your caller, e.g. pass `sonar-project-key: ${{ github.actor != 'dependabot[bot]' && 'orion-digital-solutions_my-repo' || '' }}`. An empty key skips SonarCloud.
+
+Secret scanning, licence compliance and Dockerfile lint need no secrets and run normally on Dependabot PRs.
 
 ## Updating This Repository
 
