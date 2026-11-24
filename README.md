@@ -9,7 +9,7 @@ This is the **central engineering standards repository** for the Orion Digital S
 
 > If you are a developer adding CI to a new repository, jump straight to [Quick Start](#quick-start--adding-ci-to-a-new-repository).
 >
-> Already calling the shared workflows at `@main`? Follow [MIGRATION.md](MIGRATION.md) to move to `@v1`.
+> Already calling the shared workflows at `@main` or `@v1`? Follow [MIGRATION.md](MIGRATION.md) to move to `@v2`.
 
 ---
 
@@ -28,7 +28,7 @@ This is the **central engineering standards repository** for the Orion Digital S
 - [Commit Message Convention](#commit-message-convention)
 - [Overriding Org Defaults](#overriding-org-defaults)
 - [Updating This Repository](#updating-this-repository)
-- [Migrating from `@main` to `@v1`](MIGRATION.md)
+- [Migrating to `@v2` (from `@main` or `@v1`)](MIGRATION.md)
 
 ---
 
@@ -74,7 +74,7 @@ This is the **central engineering standards repository** for the Orion Digital S
 │   ├── dependency-review.yml + .json   PR dependency vulnerability review
 │   └── codeql-analysis.yml + .json     GitHub CodeQL static analysis
 │
-├── MIGRATION.md                        Moving a caller from @main to @v1
+├── MIGRATION.md                        Moving a caller from @main / @v1 to @v2
 ├── ROADMAP.md                          CI/CD roadmap for the shared workflows
 ├── CODE_OF_CONDUCT.md                  Community standards (org-wide default)
 ├── CONTRIBUTING.md                     Contribution guidelines (org-wide default)
@@ -123,7 +123,7 @@ permissions:
 jobs:
   ci:
     name: Orion CI
-    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v2
     with:
       sonar-project-key: orion-digital-solutions_YOUR-REPO-NAME   # ← change this
       release-type: python                                          # ← change or remove
@@ -138,7 +138,7 @@ Replace `YOUR-REPO-NAME` with your GitHub repository name (lowercase, hyphens). 
 
 Keep the `permissions:` block and pass secrets by name as shown — do **not** use `secrets: inherit`, which hands every org secret to the shared workflows. A secret that is not set at org or repo level is simply passed as empty.
 
-Reference the shared workflows at **`@v1`**, the moving tag for the latest `v1.x.y` release. To choose when you upgrade, pin `@v1.0.0` (or any `vX.Y.Z`) or a full commit SHA instead. Do not use `@main`: it changes on every merge, before a release has been tested. See [How callers pin](CONTRIBUTING.md#how-callers-pin).
+Reference the shared workflows at **`@v2`**, the moving tag for the latest `v2.x.y` release, and make **`Orion CI / CI gate`** the only required status check from the orchestrator. To choose when you upgrade, pin `@v2.0.0` (or any `vX.Y.Z`) or a full commit SHA instead. `@v1` remains available but receives no new features. Do not use `@main`: it changes on every merge, before a release has been tested. See [How callers pin](CONTRIBUTING.md#how-callers-pin).
 
 ### Step 2 — Set your release type
 
@@ -217,7 +217,7 @@ Do **not** grant "Read and write" org-wide. Instead, every workflow declares the
 
 ### The Orchestrator — `ci.yml` (recommended)
 
-The orchestrator is the **recommended way** to adopt CI. One file in your repo calls all pipelines. Fixes and compatible features reach every repo that calls `@v1` when the `v1` tag is moved to a new release — no changes needed in individual repos. Breaking changes go to a new major tag (`v2`) that you adopt deliberately. The orchestrator calls its child workflows by **relative path** (`./.github/workflows/<file>.yml`), so they always come from the same commit as the `ci.yml` your repo references.
+The orchestrator is the **recommended way** to adopt CI. One file in your repo calls all pipelines. Fixes and compatible features reach every repo that calls `@v2` when the `v2` tag is moved to a new release — no changes needed in individual repos. Breaking changes go to a new major tag (`v3`) that you adopt deliberately. The orchestrator calls its child workflows by **relative path** (`./.github/workflows/<file>.yml`), so they always come from the same commit as the `ci.yml` your repo references.
 
 #### Execution model
 
@@ -258,7 +258,7 @@ Phase 1 wall-clock time is driven by the slowest of the scans plus Docker (when 
 ### Orchestrator Input Reference
 
 ```yaml
-uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v2
 with:
   # ── SonarCloud (single project) ────────────────────────────────────────
   sonar-project-key: ""              # Single-project scan.
@@ -426,7 +426,7 @@ permissions:
 
 jobs:
   secrets:
-    uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/secret-scanning.yml@v2
     with:
       full-scan: false               # true = full history, false = delta (default)
       gitleaks-version: "v8.30.1"   # optional — pin a specific version
@@ -450,7 +450,7 @@ permissions:
 
 jobs:
   docker:
-    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v2
     with:
       dockerfile: Dockerfile
       image-name: myapp:ci
@@ -472,7 +472,7 @@ permissions:
 
 jobs:
   sonar:
-    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@v2
     with:
       project-key: orion-digital-solutions_my-repo   # required
       python-version: "3.11"                          # optional
@@ -495,7 +495,7 @@ permissions:
 
 jobs:
   license:
-    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@v2
     with:
       forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"   # optional override; blank = default list
       install-command: "npm ci --omit=dev --ignore-scripts"   # optional, see below
@@ -527,7 +527,7 @@ permissions:
 
 jobs:
   sbom:
-    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@v2
     with:
       attach-to-release: true   # attach to GitHub Release assets (default)
       attest: false             # sign with Sigstore (optional)
@@ -544,7 +544,7 @@ permissions:
 
 jobs:
   release:
-    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v2
     with:
       release-type: python    # required (or manifest-mode: true)
       app-id: ${{ vars.RELEASE_APP_ID }}   # optional — GitHub App token
@@ -565,7 +565,7 @@ permissions:
 
 jobs:
   release:
-    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/release-please.yml@v2
     with:
       release-type: python
 
@@ -724,7 +724,7 @@ Every input to the orchestrator and individual workflows has a documented defaul
 
 ```yaml
 # Override the forbidden license list for a repo with specific requirements
-uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v2
 with:
   sonar-project-key: orion-digital-solutions_my-repo
   forbidden-licenses: "GPL-3.0,AGPL-3.0"   # narrower than the org default
@@ -778,7 +778,7 @@ Secret scanning, licence compliance and Dockerfile lint need no secrets and run 
 
 ## Updating This Repository
 
-Callers reference a release tag (`@v1`), so a merge to `main` does not reach them by itself: a change reaches every `@v1` caller on its next run once the `v1` tag is moved to a release that contains it. Callers still on `@main` (see [MIGRATION.md](MIGRATION.md)) pick up every merge immediately.
+Callers reference a release tag (`@v2`), so a merge to `main` does not reach them by itself: a change reaches every `@v2` caller on its next run once the `v2` tag is moved to a release that contains it. Callers still on `@main` (see [MIGRATION.md](MIGRATION.md)) pick up every merge immediately.
 
 ### To update a pipeline org-wide
 

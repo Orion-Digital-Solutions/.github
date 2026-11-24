@@ -1,14 +1,24 @@
 # Dependabot keeps the actions used by the shared workflows current.
 #
-# Note: for the github-actions ecosystem Dependabot only scans
-# .github/workflows/ in this repository. The starter templates in
-# workflow-templates/ are NOT scanned, so any action pins there (and the
-# reference to the shared workflows themselves) must be updated by hand
-# whenever the shared workflows are bumped.
+# Directories: for github-actions, "/" covers .github/workflows/ (and a root
+# action.yml, which we do not have). Any other directory is scanned for the
+# *.yml files directly inside it, so each composite action directory must be
+# listed; the globs below cover .github/actions/<name>/ and one nested level
+# (.github/actions/<name>/<inner>/). Add "/.github/actions/*/*/*" if a deeper
+# composite ever appears. `uses:` lines inside a composite's `runs.steps` are
+# updated like workflow steps; `$/` references carry no version and are left
+# alone. `directories` (not `directory`) is the key that accepts globs.
+#
+# Note: the starter templates in workflow-templates/ are NOT scanned, so any
+# action pins there (and the reference to the shared workflows themselves)
+# must be updated by hand whenever the shared workflows are bumped.
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directory: /
+    directories:
+      - "/"
+      - "/.github/actions/*"
+      - "/.github/actions/*/*"
     schedule:
       interval: weekly
       day: monday

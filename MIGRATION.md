@@ -158,3 +158,28 @@ uses: orion-digital-solutions/.github/.github/workflows/ci.yml@<full 40-characte
 `vX.Y.Z` tags are never moved or deleted. With either pin you must update the ref yourself to receive fixes; see the [release notes](https://github.com/Orion-Digital-Solutions/.github/releases) and [How callers pin](CONTRIBUTING.md#how-callers-pin).
 
 Questions or a failing migration: open an issue in this repository.
+
+---
+
+# Migrating from v1 to v2
+
+> v2 is released (`v2.0.0`, moving tag `v2`). `@v1` stays available for repos that have not migrated yet but receives no new features.
+
+v2 runs the same checks in far fewer jobs. In the sandbox, a full run went from 16 billed minutes to 6, and a docs-only pull request costs 2.
+
+## What you change
+
+1. **`@v1` → `@v2`** on the orchestrator call. Keep the calling job's `name: Orion CI`; it is part of the check name.
+2. **Required status checks.** Remove every old Orion CI check from your branch protection or ruleset and require **only `Orion CI / CI gate`**. The old names (`Orion CI / Resolve CI plan`, `… / Secret Scanning / Gitleaks Secret Scan`, `… / License Compliance / OSS License Compliance`, `… / SonarCloud (<key>) / SonarCloud Scan`, `… / Docker (<id>) / …`, `… / CI Report`) no longer exist, and required checks that never report block merging. Also stop requiring SonarCloud's own per-project checks: projects a PR does not touch are no longer scanned and post nothing.
+3. **Nothing else is required.** The `permissions:` block and named secrets are the same as v1; no inputs were removed.
+
+## What changes in behaviour
+
+- **One "Fast checks" job** runs plan, secret scan and licence scan; **one "Dockerfile lint" job** lints every Dockerfile; the opt-in image job builds, scans, generates SBOMs and runs Dive in one job per image.
+- **Pull requests scan only the SonarCloud projects they touch** (by `base-dir`, or the new optional `"paths"` globs per project). Pushes to `main` always scan every project.
+- **Docs-only changes** (new input `docs-only-paths`, sensible default; blank disables it) skip Sonar, Dockerfile lint and image jobs on PRs and non-main pushes. Secret and licence scans still run.
+- **Schedule** runs only the full-history secret scan, the licence scan and (if enabled) the image CVE scan. **Release** runs only SBOM generation and publishing.
+- **Self-hosted runners** passed through `runner:` must be runner 2.336.0 or newer (v2 uses the `$/` self-repository action syntax).
+- **New: dependency vulnerability scan (on by default).** Fast checks runs Trivy against your lock files and manifests; a **fixable CRITICAL or HIGH CVE now fails `CI gate`**. Options: fix it (usually a dependency bump), accept a specific CVE in `.trivyignore` at the repo root (on PRs this file is read from the base branch, so a PR cannot ignore its own new CVE), narrow it with `dependency-scan-severity: CRITICAL`, or opt out with `dependency-scan: false`. Commit lock files: without them only exact version pins are checked.
+- **Gitleaks findings appear in the Security tab** on public repositories (full-history and PR scans).
+- **SonarCloud coverage:** the coverage artifact is no longer extracted over your checkout. Only the report files you declare (`sonar-python-coverage-report`, `sonar-js-coverage-report`, `*.reportPath(s)` in `sonar-extra-args` or `sonar-project.properties`) are copied into place. If you relied on SonarCloud's default report locations without declaring them, declare them.

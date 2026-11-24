@@ -19,7 +19,7 @@ permissions:
 jobs:
   stale:
     name: Stale Issue & PR Management
-    uses: orion-digital-solutions/.github/.github/workflows/stale.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/stale.yml@v2
     with:
       # ── Issues ─────────────────────────────────────────────────────────────
       # Mark stale after 60 days of inactivity; close 14 days after that.

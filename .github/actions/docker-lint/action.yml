@@ -1,0 +1,244 @@
+name: Dockerfile lint
+description: >-
+  Hadolint and Checkov for a list of Dockerfiles in one job (ROADMAP 6.4, see
+  docs/v2-design.md). Installs a hash-verified Hadolint binary once, pulls a
+  digest-pinned Checkov image once, then lints every target in turn. Does not
+  check out code: the calling job must check out the repository (with
+  persist-credentials false). Never stops at the first failing target: every
+  target is linted and reported, and the last step fails once, only when
+  `fail-on-findings` is true.
+
+# ── Targets ──────────────────────────────────────────────────────────────────
+# `targets` is a JSON array, the same shape as the CI orchestrator's plan
+# output:  [{"dockerfile": "apps/api/Dockerfile", "context": "apps/api",
+#            "target-id": "apps-api-dockerfile"}, ...]
+# `dockerfile` is required. `target-id` is required and unique when there is
+# more than one target; a single target may leave it blank (the v1 standalone
+# names below then have no suffix). `context` and other keys (image-name) are
+# accepted and ignored: linting needs only the Dockerfile.
+#
+# ── Tool versions (kept from v1) ─────────────────────────────────────────────
+# Hadolint v2.12.0: the version hadolint/hadolint-action v3.1.0 runs
+#   (ghcr.io/hadolint/hadolint:v2.12.0-debian), configured through the same
+#   HADOLINT_* environment variables that action set from our v1 inputs
+#   (format sarif, failure-threshold info, ignore list), so a repository's
+#   .hadolint.yaml keeps the same precedence.
+#   Hadolint 2.15 (new rules such as DL3066) stays a separate decision
+#   (ROADMAP 3.6).
+# Checkov: the image bridgecrewio/checkov-action v12.3141.0 runs
+#   (ghcr.io/bridgecrewio/checkov:3.4.5), pinned by digest, invoked with the
+#   arguments that action's entrypoint built from our v1 inputs:
+#   -f <dockerfile> --framework dockerfile --skip-check <id>... --output cli
+#   --output sarif, LOG_LEVEL=WARNING, workspace mounted at /github/workspace.
+#
+# ── Outputs per target (same names and schema as v1) ─────────────────────────
+# SARIF categories  hadolint-dockerfile[-<id>], checkov-dockerfile[-<id>].
+#   One upload per tool: each target's SARIF run carries its own category in
+#   runs[].automationDetails.id, which upload-sarif keeps (it only fills the
+#   field when absent) and which makes every run unique, so the runs are not
+#   rejected as duplicates.
+# Lint result JSON  docker-lint-result.json, schema
+#   {target_id, dockerfile, hadolint_outcome, checkov_outcome,
+#    hadolint_findings, checkov_failed}
+#   A composite action cannot create a variable number of artifacts, so all
+#   targets go into ONE artifact named `artifact-name`. With one target the
+#   file sits at the artifact root (byte-for-byte the v1 layout); with several,
+#   each is at docker-lint-result-<id>/docker-lint-result.json. The CI report
+#   finds them with `find -name docker-lint-result.json` either way.
+#
+# ── Verdict ──────────────────────────────────────────────────────────────────
+# `result`: clean | findings | error. `error` means a setup step (validation,
+# Hadolint install, Checkov pull) failed, so nothing was linted.
+# `failed-targets`: JSON array of the target-ids (the Dockerfile path for a
+# blank id) where Hadolint or Checkov failed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+inputs:
+  targets:
+    description: 'JSON array of {"dockerfile", "context", "target-id"} objects (see the header).'
+    required: true
+
+  hadolint-ignore:
+    description: "Hadolint rule IDs to ignore, comma-, space- or newline-separated (e.g. DL3008,SC2035)"
+    required: false
+    default: ""
+
+  hadolint-version:
+    description: "Kept for v1 compatibility. Hadolint is pinned to v2.12.0 (the version hadolint-action v3.1.0 ran); any other value only produces a warning."
+    required: false
+    default: "v2.12.0"
+
+  checkov-skip-check:
+    description: "Comma-separated Checkov check IDs to skip (e.g. CKV_DOCKER_2,CKV_DOCKER_7)"
+    required: false
+    default: ""
+
+  upload-sarif:
+    description: "'true' (default): upload SARIF to code scanning when the repository has it (probed first)."
+    required: false
+    default: "true"
+
+  artifact-name:
+    description: "Name of the lint result artifact. v1 standalone passes docker-lint-result[-<id>]."
+    required: false
+    default: "docker-lint-results"
+
+  artifact-retention-days:
+    description: "Retention period in days for the lint result artifact"
+    required: false
+    default: "7"
+
+  fail-on-findings:
+    description: "'true' (default): the last step fails when `result` is not clean. 'false': never fail; read the outputs instead."
+    required: false
+    default: "true"
+
+  github-token:
+    description: "Token for the code-scanning probe and the SARIF upload (needs security-events: write, and actions: read on private repositories)."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  result:
+    description: "clean | findings | error"
+    value: ${{ steps.verdict.outputs.result }}
+  failed-targets:
+    description: "JSON array of target-ids (Dockerfile path for a blank id) where Hadolint or Checkov failed"
+    value: ${{ steps.verdict.outputs.failed-targets }}
+
+runs:
+  using: composite
+  steps:
+    # Validates `targets`, normalises the tool option lists and creates the
+    # work directory. Everything later reads the files this step writes.
+    - name: Prepare targets
+      id: prepare
+      continue-on-error: true
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+        RAW_IGNORE: ${{ inputs.hadolint-ignore }}
+        RAW_SKIP: ${{ inputs.checkov-skip-check }}
+        HADOLINT_VERSION_INPUT: ${{ inputs.hadolint-version }}
+      run: bash "${GITHUB_ACTION_PATH}/prepare.sh"
+
+    - name: Install Hadolint v2.12.0
+      id: install
+      if: steps.prepare.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        WORK_DIR: ${{ steps.prepare.outputs.work-dir }}
+      run: bash "${GITHUB_ACTION_PATH}/install-hadolint.sh"
+
+    # Same image bridgecrewio/checkov-action v12.3141.0 runs
+    # (docker://ghcr.io/bridgecrewio/checkov:3.4.5), pinned to the digest of
+    # that tag's multi-arch index. Bump the tag and digest together.
+    - name: Pull Checkov image
+      id: pull
+      if: steps.prepare.outcome == 'success'
+      continue-on-error: true
+      shell: bash
+      env:
+        CHECKOV_IMAGE: ghcr.io/bridgecrewio/checkov:3.4.5@sha256:122602cf32cc72286155d39f1f234b7b594818f7b8d7fdf490701620e521368b
+      run: |
+        set -euo pipefail
+        for attempt in 1 2 3; do
+          if docker pull --quiet "${CHECKOV_IMAGE}"; then
+            echo "image=${CHECKOV_IMAGE}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "::warning::docker pull failed (attempt ${attempt}/3)"
+          sleep $((attempt * 5))
+        done
+        echo "::error::Could not pull ${CHECKOV_IMAGE}"
+        exit 1
+
+    # Code scanning (SARIF upload) is unavailable on private repositories
+    # without Advanced Security. Probe once and skip the uploads instead of
+    # failing on a 403.
+    - name: Check code scanning availability
+      id: sarif-preflight
+      if: inputs.upload-sarif == 'true' && steps.prepare.outcome == 'success'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        API_URL: ${{ github.api_url }}
+        REPO: ${{ github.repository }}
+      run: bash "${GITHUB_ACTION_PATH}/sarif-preflight.sh"
+
+    # Lints every target. Never fails: per-target outcomes go into the result
+    # JSON files and the step outputs.
+    - name: Lint Dockerfiles
+      id: lint
+      if: steps.prepare.outcome == 'success' && steps.install.outcome == 'success' && steps.pull.outcome == 'success'
+      shell: bash
+      env:
+        WORK_DIR: ${{ steps.prepare.outputs.work-dir }}
+        HADOLINT_BIN: ${{ steps.install.outputs.path }}
+        CHECKOV_IMAGE: ${{ steps.pull.outputs.image }}
+      run: bash "${GITHUB_ACTION_PATH}/lint.sh"
+
+    # Supplementary: must never fail the job (concurrent uploads can 409).
+    # No `category` input: each run already carries its own.
+    - name: Upload Hadolint SARIF
+      if: ${{ !cancelled() && steps.sarif-preflight.outputs.available == 'true' && steps.lint.outputs.hadolint-sarif-count != '' && steps.lint.outputs.hadolint-sarif-count != '0' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ steps.lint.outputs.hadolint-sarif-dir }}
+        token: ${{ inputs.github-token }}
+
+    - name: Upload Checkov SARIF
+      if: ${{ !cancelled() && steps.sarif-preflight.outputs.available == 'true' && steps.lint.outputs.checkov-sarif-count != '' && steps.lint.outputs.checkov-sarif-count != '0' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+      with:
+        sarif_file: ${{ steps.lint.outputs.checkov-sarif-dir }}
+        token: ${{ inputs.github-token }}
+
+    - name: Upload lint results artifact
+      if: ${{ !cancelled() && steps.lint.outputs.results-dir != '' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.lint.outputs.results-dir }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: warn
+
+    - name: Verdict
+      id: verdict
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        PREPARE_OUTCOME: ${{ steps.prepare.outcome }}
+        INSTALL_OUTCOME: ${{ steps.install.outcome }}
+        PULL_OUTCOME: ${{ steps.pull.outcome }}
+        LINT_OUTCOME: ${{ steps.lint.outcome }}
+        FAILED_TARGETS: ${{ steps.lint.outputs.failed-targets }}
+        FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+      run: |
+        set -euo pipefail
+        result=clean
+        if [ "${PREPARE_OUTCOME}" != success ] || [ "${INSTALL_OUTCOME}" != success ] \
+           || [ "${PULL_OUTCOME}" != success ] || [ "${LINT_OUTCOME}" != success ]; then
+          result=error
+          FAILED_TARGETS='[]'
+        elif [ "$(printf '%s' "${FAILED_TARGETS:-[]}" | jq 'length')" -gt 0 ]; then
+          result=findings
+        fi
+        {
+          echo "result=${result}"
+          echo "failed-targets=$(printf '%s' "${FAILED_TARGETS:-[]}" | jq -c .)"
+        } >> "${GITHUB_OUTPUT}"
+        echo "Dockerfile lint result: ${result}"
+        if [ "${FAIL_ON_FINDINGS}" = "true" ]; then
+          case "${result}" in
+            error)
+              echo "::error::Dockerfile lint could not run (prepare: ${PREPARE_OUTCOME}, Hadolint install: ${INSTALL_OUTCOME}, Checkov pull: ${PULL_OUTCOME}, lint: ${LINT_OUTCOME}). See the step logs above."
+              exit 1 ;;
+            findings)
+              echo "::error::Dockerfile lint/security check(s) failed for: $(printf '%s' "${FAILED_TARGETS}" | jq -r 'join(", ")'). See the CI Report (or the GitHub Security tab) for the exact checks."
+              exit 1 ;;
+          esac
+        fi

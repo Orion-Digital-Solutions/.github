@@ -7,8 +7,10 @@ name: Lint workflows
 #                    on run: scripts
 #   zizmor         - security audit (template injection, pinning, permissions);
 #                    fails on medium or higher. Policy: .github/zizmor.yml
-#   pinned-inputs  - `with:` keys of SHA-pinned step actions checked against
-#                    their action.yml (actionlint skips SHA-pinned actions)
+#   pinned-inputs  - `with:` keys of SHA-pinned and `$/` step actions checked
+#                    against their action.yml (actionlint skips SHA-pinned
+#                    actions and must ignore `$/`), in workflows and in the
+#                    composite actions under .github/actions/
 #
 # Tool versions and hashes are pinned here; bump them by hand, respecting the
 # 7-day cool-down (see CONTRIBUTING.md, "Releasing the shared workflows").
@@ -18,6 +20,7 @@ on:
     paths:
       - ".github/workflows/**"
       - "workflow-templates/**"
+      - ".github/actions/**"
       - ".github/scripts/**"
       - ".github/zizmor.yml"
   push:
@@ -25,6 +28,7 @@ on:
     paths:
       - ".github/workflows/**"
       - "workflow-templates/**"
+      - ".github/actions/**"
       - ".github/scripts/**"
       - ".github/zizmor.yml"
 
@@ -65,10 +69,21 @@ jobs:
       # shellcheck is preinstalled on ubuntu-latest, so run: scripts are
       # checked too. Only warnings and errors fail the job; style and info
       # notes (SC2129, SC2005, ...) are left to review.
+      #
+      # actionlint 1.7.12 does not know the self-repository prefix `$/` and
+      # reports every `$/` step and reusable workflow call as malformed. Those
+      # two messages are ignored until actionlint ships rhysd/actionlint#732;
+      # pinned-inputs checks the `with:` keys of `$/` steps instead. actionlint
+      # does not read action.yml files on their own, so composites under
+      # .github/actions/ are covered by zizmor and pinned-inputs only.
       - name: Run actionlint
         env:
           SHELLCHECK_OPTS: --severity=warning
-        run: actionlint -color .github/workflows/*.yml workflow-templates/*.yml
+        run: >-
+          actionlint -color
+          -ignore '^specifying action "\$/'
+          -ignore '^reusable workflow call "\$/'
+          .github/workflows/*.yml workflow-templates/*.yml
 
   zizmor:
     name: zizmor
@@ -100,14 +115,19 @@ jobs:
             -r "${RUNNER_TEMP}/zizmor-requirements.txt"
 
       # Files are passed explicitly: given the workflow-templates/ directory,
-      # zizmor collects nothing from it.
+      # zizmor collects nothing from it. It audits a file named action.yml as
+      # an action definition. globstar picks up nested composites
+      # (.github/actions/x/inner/action.yml); nullglob drops the pattern when
+      # nothing matches (zizmor errors on a literal path that does not exist).
       - name: Run zizmor
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          zizmor --config .github/zizmor.yml --min-severity medium
-          --format plain --color always
-          .github/workflows/*.yml workflow-templates/*.yml
+        run: |
+          shopt -s globstar nullglob
+          zizmor --config .github/zizmor.yml --min-severity medium \
+            --format plain --color always \
+            .github/workflows/*.yml workflow-templates/*.yml \
+            .github/actions/**/action.yml
 
   pinned-inputs:
     name: pinned-inputs
@@ -137,8 +157,13 @@ jobs:
             --only-binary=:all: --require-hashes \
             -r "${RUNNER_TEMP}/pinned-inputs-requirements.txt"
 
-      # gh (preinstalled on the runner) reads action.yml at each pinned SHA.
+      # gh (preinstalled on the runner) reads action.yml at each pinned SHA;
+      # `$/` actions are read from this checkout (run from the repo root).
       - name: Check inputs of pinned actions
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python .github/scripts/check_pinned_inputs.py .github/workflows/*.yml workflow-templates/*.yml
+        run: |
+          shopt -s globstar nullglob
+          python .github/scripts/check_pinned_inputs.py \
+            .github/workflows/*.yml workflow-templates/*.yml \
+            .github/actions/**/action.yml

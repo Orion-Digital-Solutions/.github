@@ -56,7 +56,7 @@ jobs:
     name: Orion CI
     # @v1 follows the latest v1.x.y release. For full control pin @v1.0.0 or a
     # commit SHA instead. Never @main: it changes before a release is tested.
-    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v2
     with:
       # ── Release ─────────────────────────────────────────────────────────
       # SINGLE-package repo: set release-type. Options: python, node, java,

@@ -24,7 +24,7 @@ permissions:
 jobs:
   labels:
     name: Label Sync
-    uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/label-sync.yml@v2
     with:
       # Set to true only if you want a strict sync that removes any labels
       # that are not in the org canonical set.  Defaults to false (additive).
