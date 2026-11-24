@@ -91,7 +91,7 @@ permissions:
 jobs:
   docker-lint:
     name: Docker Best Practices
-    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v2
     with:
       # ── Image build ────────────────────────────────────────────────────────
       # Required for this template: the reusable workflow defaults build-image to

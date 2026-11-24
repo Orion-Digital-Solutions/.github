@@ -3,7 +3,7 @@ name: Docker Best Practices (Reusable)
 # Reusable workflow — comprehensive Dockerfile quality, security, and compliance pipeline.
 #
 # Caller usage:
-#   uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v1
+#   uses: orion-digital-solutions/.github/.github/workflows/docker-lint.yml@v2
 #   permissions:               # union of what the jobs below request — a called
 #     contents: write          # workflow can never be granted more than its caller
 #     security-events: write

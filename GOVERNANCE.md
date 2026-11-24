@@ -114,7 +114,7 @@ Every reusable workflow exposes documented inputs. Pass non-default values at th
 ```yaml
 jobs:
   ci:
-    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v2
     with:
       forbidden-licenses: "GPL-3.0,AGPL-3.0"   # narrower than the org default
       secret-scan-full-history: true
@@ -129,13 +129,13 @@ See the [Orchestrator Input Reference](README.md#orchestrator-input-reference) f
 
 ### Pinning to a specific version
 
-Callers use the moving major tag `@v1`, which receives every reviewed, sandbox-tested fix and non-breaking improvement (see the release procedure in [CONTRIBUTING.md](CONTRIBUTING.md)). Breaking changes ship as a new major (`@v2`). To freeze a repository at an exact version, pin to an immutable release tag or a commit SHA:
+Callers use the moving major tag `@v2`, which receives every reviewed, sandbox-tested fix and non-breaking improvement (see the release procedure in [CONTRIBUTING.md](CONTRIBUTING.md)). Breaking changes ship as a new major (`@v3`); `@v1` stays available without new features. To freeze a repository at an exact version, pin to an immutable release tag or a commit SHA:
 
 ```yaml
-uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v1.0.0
+uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v2.0.0
 ```
 
-Exactly pinned repositories do not receive security fixes until they bump the pin. Do not reference `@main`: it is the integration branch, not a release. See [MIGRATION.md](MIGRATION.md) for moving from `@main` to `@v1`.
+Exactly pinned repositories do not receive security fixes until they bump the pin. Do not reference `@main`: it is the integration branch, not a release. See [MIGRATION.md](MIGRATION.md) for moving to `@v2`.
 
 ---
 

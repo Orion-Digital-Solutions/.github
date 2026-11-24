@@ -17,7 +17,7 @@ permissions:
 jobs:
   sbom:
     name: SBOM Generation
-    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@v1
+    uses: orion-digital-solutions/.github/.github/workflows/sbom.yml@v2
     # Uncomment `with:` together with any option below. An empty `with:` is invalid.
     # with:
       # scan-path: "."                     # default: repo root

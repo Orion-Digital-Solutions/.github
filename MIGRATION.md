@@ -163,7 +163,7 @@ Questions or a failing migration: open an issue in this repository.
 
 # Migrating from v1 to v2
 
-> v2 is not released yet. This section describes the draft on branch `ci/v2-dev`; it will be tagged `v2` only after callers have moved to `@v1`.
+> v2 is released (`v2.0.0`, moving tag `v2`). `@v1` stays available for repos that have not migrated yet but receives no new features.
 
 v2 runs the same checks in far fewer jobs. In the sandbox, a full run went from 16 billed minutes to 6, and a docs-only pull request costs 2.
 

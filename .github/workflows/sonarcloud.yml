@@ -18,7 +18,7 @@ name: SonarCloud Analysis (Reusable)
 # Coverage is produced by the project repo and handed to CI — CI never runs tests.
 #
 # Caller usage:
-#   uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@v1
+#   uses: orion-digital-solutions/.github/.github/workflows/sonarcloud.yml@v2
 #   with:
 #     project-key: orion-digital-solutions_my-repo
 #   secrets: inherit

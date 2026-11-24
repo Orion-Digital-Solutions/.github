@@ -7,7 +7,7 @@ name: License Compliance (Reusable)
 #     contents: read
 #     security-events: write
 #     actions: read
-#   uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@v1
+#   uses: orion-digital-solutions/.github/.github/workflows/license-compliance.yml@v2
 #   with:
 #     forbidden-licenses: "GPL-2.0,GPL-3.0,AGPL-3.0"
 #     install-command: "npm ci --omit=dev --ignore-scripts"
