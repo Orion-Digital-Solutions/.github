@@ -54,8 +54,10 @@ permissions:
 jobs:
   ci:
     name: Orion CI
-    # @v1 follows the latest v1.x.y release. For full control pin @v1.0.0 or a
-    # commit SHA instead. Never @main: it changes before a release is tested.
+    # Keep the job id `ci` and `name: Orion CI`: the required status check is
+    # "Orion CI / CI gate". @v2 follows the latest v2.x.y release; for full
+    # control pin @v2.0.0 or a commit SHA. Never @main: it changes before a
+    # release is tested.
     uses: orion-digital-solutions/.github/.github/workflows/ci.yml@v2
     with:
       # ── Release ─────────────────────────────────────────────────────────
